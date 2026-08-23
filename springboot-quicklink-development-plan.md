@@ -52,9 +52,11 @@ This project runs **Spring Boot 4.1** (Spring Framework 7.0). Virtually every tu
 | `spring-boot-starter-test` — one jar for everything | split per slice: `spring-boot-starter-webmvc-test`, `spring-boot-starter-data-jpa-test`, `spring-boot-starter-actuator-test`, `spring-boot-starter-flyway-test` |
 | Jackson 2 — `com.fasterxml.jackson.databind` | **Jackson 3** — databind moved to `tools.jackson.databind` (annotations stay at `com.fasterxml.jackson.annotation`) |
 | Testcontainers 1.x — `org.testcontainers:postgresql`, `:junit-jupiter` | Testcontainers **2.x** — `org.testcontainers:testcontainers-postgresql`, `:testcontainers-junit-jupiter` |
+| `org.testcontainers.containers.PostgreSQLContainer<?>` (generic) | `org.testcontainers.postgresql.PostgreSQLContainer` — **new package, and no longer generic** (write `new PostgreSQLContainer("postgres:16")`, no diamond). The old `containers.*` class still exists for compatibility, and your IDE will offer it first. |
+| `@AutoConfigureMockMvc` in `org.springframework.boot.test.autoconfigure.web.servlet` | `org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc` — Boot 4 split the monolithic test-autoconfigure module per technology |
 | Spring Framework 6 | Spring Framework 7 |
 
-**Unchanged**, despite what you might expect: `spring-boot-starter-data-jpa`, `spring-boot-starter-data-redis`, `spring-boot-starter-amqp`, `spring-boot-starter-actuator`, `spring-boot-starter-validation`.
+**Unchanged**, despite what you might expect: `spring-boot-starter-data-jpa`, `spring-boot-starter-data-redis`, `spring-boot-starter-amqp`, `spring-boot-starter-actuator`, `spring-boot-starter-validation`, and `@ServiceConnection` (still `org.springframework.boot.testcontainers.service.connection.ServiceConnection`).
 
 All of the above are version-managed by `spring-boot-starter-parent`, so **never write a `<version>` tag** for them.
 
@@ -151,12 +153,16 @@ Each stage produces something you can run and demo. Build the vertical slice fir
 
 **Goal:** POST a URL, get a short code; GET the code, receive a redirect.
 
-1. **Flyway migration** at `app-service/src/main/resources/db/migration/V1__init.sql` — note the **double** underscore; with a single one Flyway silently ignores the file.
+1. **Flyway migration** at `app-service/src/main/resources/db/migration/V1__init.sql` — note the **double** underscore; with a single one Flyway silently ignores the file. You need **two** sequences: one for the primary key (Hibernate calls this one privately) and one you call yourself for short codes. Step 3 explains why they must be separate.
    ```sql
-   -- An explicit sequence, NOT bigserial. Step 3 explains why this choice matters.
+   -- Explicit sequences, NOT bigserial. Step 3 explains why there are two.
+   -- link_id_seq  : the primary key. Hibernate calls nextval() itself, inside save().
+   -- link_code_seq: the short code. YOU call nextval() before save(), because the
+   --                code must be set before the INSERT is built.
    -- Starting past 62^4 (14,776,336) guarantees every short code is >= 5 characters,
    -- instead of the first links being "1", "2", "3".
-   CREATE SEQUENCE link_id_seq START WITH 14776336 INCREMENT BY 1;
+   CREATE SEQUENCE link_id_seq   START WITH 14776336 INCREMENT BY 1;
+   CREATE SEQUENCE link_code_seq START WITH 14776336 INCREMENT BY 1;
 
    CREATE TABLE link (
      id           BIGINT PRIMARY KEY DEFAULT nextval('link_id_seq'),
@@ -171,6 +177,8 @@ Each stage produces something you can run and demo. Build the vertical slice fir
    > **Deliberately no `CREATE INDEX` on `short_code`.** In Postgres a `UNIQUE` constraint *is* implemented as a unique B-tree index, so adding an explicit index would build and maintain a second, identical one — pure write overhead for zero read gain. The README line to write is: _"the unique constraint on `short_code` gives me the redirect lookup index for free, so resolving a code is a single index probe."_ That phrasing shows you understand the mechanism rather than having copied it — which is the whole point of building this.
    >
    > **Never edit a migration once it has been applied.** Flyway checksums applied files and will refuse to start. Add `V2__...` instead. If you need to reset while experimenting: `docker compose down -v` to drop the volume.
+   >
+   > If you already applied a `V1` without `link_code_seq`, don't edit it — put `CREATE SEQUENCE link_code_seq START WITH 14776336 INCREMENT BY 1;` in a new `V2__link_code_seq.sql`.
 2. **JPA entity** `Link` + **repository** `LinkRepository extends JpaRepository<Link, Long>` declaring `Optional<Link> findByShortCode(String code)`. You write **no implementation** — Spring Data parses the method name and generates the query at startup, so a misspelled field fails at boot rather than at runtime.
 
    Mapping details that will bite you otherwise:
@@ -190,40 +198,86 @@ Each stage produces something you can run and demo. Build the vertical slice fir
      }
    }
    ```
-   **You must obtain the id _before_ the INSERT.** The obvious-sounding flow — "insert the row, read back the generated id, then `UPDATE` it with the short code" — **cannot work here**: `short_code` is `NOT NULL`, so that first insert fails before any id exists. The fix is choosing the right id-generation strategy:
+   Uniqueness comes **from the counter, not from checking**: a sequence guarantees distinct numbers, and base conversion is a bijection, so distinct numbers can only produce distinct strings. No collision query, no retry loop. Compare the alternatives — random-string-with-collision-check needs a DB round trip on every insert and degrades as the table fills; hashing the URL makes two users share one link and its analytics.
 
-   | Strategy | When the id exists | Consequence |
-   | --- | --- | --- |
-   | `IDENTITY` (what `bigserial` implies) | *during* the INSERT | Hibernate can't know it in advance, forcing INSERT-then-UPDATE — and it silently disables JDBC batching |
-   | **`SEQUENCE`** (use this) | *before* the INSERT, via `nextval()` | the id is available at `persist()`, so you compute the code in memory and send **one** fully-populated INSERT |
+   **The critical constraint: you must have the code before the row is inserted.**
 
-   So map the id against the sequence created in step 1:
+   `repository.save(link)` does **not** send SQL. It records an intent, and Hibernate captures the entity's field values **at that moment**. The `INSERT` is sent later, when the transaction commits (or when a query forces an early flush). Anything you change *after* `save()` becomes a **separate `UPDATE`**, scheduled after the insert:
+
+   ```java
+   linkRepository.save(link);                          // snapshot taken: short_code = null
+   link.setShortCode(Base62.encode(link.getId()));     // too late for the INSERT
+
+   // Hibernate plans:
+   //   INSERT INTO link (..., short_code, ...) VALUES (..., null, ...);   <- fails: NOT NULL
+   //   UPDATE link SET short_code = '10000' WHERE id = ...;              <- never runs
+   ```
+
+   So the code must be assigned **before** `save()`. That rules out deriving it from the primary key, because the PK comes from a sequence Hibernate calls *inside* `save()` — you cannot see that number beforehand without taking over id assignment entirely (dropping `@GeneratedValue`, assigning ids by hand, and defeating `save()`'s id-is-null "is this new?" check, which would otherwise route you through `merge()` and a wasted SELECT).
+
+   **The fix: a second sequence that you own.**
+   ```sql
+   CREATE SEQUENCE link_code_seq START WITH 14776336 INCREMENT BY 1;   -- 62^4
+   ```
+   ```java
+   // LinkRepository
+   @Query(value = "SELECT nextval('link_code_seq')", nativeQuery = true)
+   long nextCodeValue();
+   ```
+   ```java
+   // LinkService
+   @Transactional
+   public Link createLink(String longUrl, Instant expiresAt) {
+       long codeValue = linkRepository.nextCodeValue();
+
+       Link link = new Link();
+       link.setShortCode(Base62.encode(codeValue));   // set BEFORE save
+       link.setTargetType(TargetType.URL);
+       link.setTargetUrl(longUrl);
+       link.setExpiresAt(expiresAt);
+
+       return linkRepository.save(link);              // one clean INSERT
+   }
+   ```
+   Leave the entity's id mapping alone — `@GeneratedValue` keeps handling the PK from `link_id_seq`:
    ```java
    @Id
    @GeneratedValue(strategy = GenerationType.SEQUENCE, generator = "link_seq")
    @SequenceGenerator(name = "link_seq", sequenceName = "link_id_seq", allocationSize = 1)
    private Long id;
    ```
-   > **`allocationSize` gotcha:** Hibernate's default is **50**, which assumes the database sequence is declared `INCREMENT BY 50`. Yours increments by 1, so leaving the default produces id collisions. Set `allocationSize = 1`; if you later want the batching win, raise the annotation and the SQL together.
+   > **`allocationSize` gotcha:** Hibernate's default is **50**, which assumes the DB sequence is declared `INCREMENT BY 50`. Yours increments by 1, so the default causes id collisions. Set `allocationSize = 1`.
 
-   Inside one `@Transactional` service method the flow becomes:
-   ```
-   repository.save(link)                            // persist() -> nextval(), id assigned; INSERT not yet sent
-   link.setShortCode(Base62.encode(link.getId()));  // the id is available now
-   // transaction commits -> dirty-checked flush -> a single INSERT with short_code populated
-   ```
-   Because ids are unique, codes never collide — no retry loop needed. Know the tradeoff: sequential codes are **enumerable** (`aB3xZ` implies `aB3xY` probably exists). The standard mitigation is XOR-ing the id with a secret constant before encoding — two lines, and a good thing to have an opinion about in an interview.
-4. **Service layer:** `createLink(longUrl, expiresAt)` and `resolve(code)`. Put `@Transactional` **on the service, not the controller** — that boundary is what makes the dirty-checking flow in step 3 work. Validate the URL with Jakarta Validation (`@URL` from Hibernate Validator, via `spring-boot-starter-validation`) and reject malformed input with `400`.
+   This is arguably better than deriving the code from the id: **your public identifier is decoupled from your primary key**, so you can change PK strategy later without invalidating a single existing short code. Nothing ever needs `decode(shortCode) == id` — links are looked up by `short_code`.
+
+   > **Expect gaps, and expect the two counters to drift apart.** Sequences are deliberately non-transactional: `nextval()` never rolls back, because two concurrent transactions must never receive the same number. Failed inserts and rolled-back tests consume numbers permanently. This is normal in every real system — codes stay unique, they just aren't contiguous.
+
+   **The tradeoff you're accepting:** sequential counters make codes enumerable (`1000m` implies `1000n` probably exists). The standard mitigation is `encode(codeValue ^ SECRET)` — reversible, cheap, hides creation order. Be honest that it's obfuscation, not security: XOR with a fixed key falls to anyone who learns a few pairs. The real defense against enumeration is **rate limiting** (Stage 2), and "I XORed to avoid leaking ordering, and rate-limited the redirect endpoint" is a much stronger answer than either alone.
+4. **Service layer:** `createLink(longUrl, expiresAt)` and `resolve(code)` (the `createLink` body is in step 3). Put `@Transactional` **on the service, not the controller** — that is the boundary the whole flush model depends on. Use `@Transactional(readOnly = true)` on `resolve` to skip dirty checking.
+   - Import `org.springframework.transaction.annotation.Transactional`, **not** `jakarta.transaction.Transactional` — your IDE offers both, and the Jakarta one silently ignores `readOnly`.
+   - `@Transactional` works by wrapping the bean in a **proxy**, so it only applies to calls arriving from outside. A `this.otherTransactionalMethod()` call bypasses the proxy and gets **no transaction**, silently. The most common Spring bug there is.
+   - Spring rolls back on `RuntimeException`/`Error` but **not** on checked exceptions. Extend `RuntimeException` for your own.
+   - **The expiry check needs a null guard:** `expiresAt == null` means *never expires*, so write `expiresAt != null && expiresAt.isBefore(Instant.now())`. Without it, every permanent link throws an NPE.
+   - Not-found → a `LinkNotFoundException extends RuntimeException` annotated `@ResponseStatus(HttpStatus.NOT_FOUND)`. Spring turns it into a 404 with no try/catch anywhere. (Throwing `ResponseStatusException` from the service also works but drags `org.springframework.http` into your business layer.)
+   - Validation belongs on the request DTO (step 5), not here — add `spring-boot-starter-validation` to the pom, it isn't in the Initializr output.
    > `spring-boot-starter-validation` is **not** in the generated pom — add it now, it's needed for steps 4 and 5.
-5. **Controllers:**
-   - `POST /api/links` body `{ "longUrl": "...", "expiresAt": "..." }` → `201` `{ "shortCode", "shortUrl" }`. Use `@Valid @RequestBody` so constraint violations turn into `400` automatically. A record is the right shape for the request/response DTOs (unlike the entity).
-   - `GET /{shortCode}` → look up, check expiry, return **302** — `ResponseEntity.status(HttpStatus.FOUND).location(URI.create(target)).build()`. Temporary is right because it preserves click analytics; know why you'd pick 301 for the pure load-reduction case.
-   - **Constrain that catch-all.** A bare `@GetMapping("/{shortCode}")` sits at the root and will swallow `/favicon.ico`, `/robots.txt`, and every mistyped path. Use a regex instead: `@GetMapping("/{shortCode:[0-9a-zA-Z]{5,16}}")`. (`/api/**` still wins over it — Spring prefers the more specific pattern — and `/actuator/**` is mapped separately.)
+5. **Controllers:** return **DTOs, never the entity.** Serializing `Link` would leak `id` (defeating the point of short codes) and your column names into your public API — and with `open-in-view: false` the entity is detached by serialization time. Records are ideal for DTOs, unlike entities.
+   - `CreateLinkRequest(String longUrl, Instant expiresAt)` with `@NotBlank` + `@URL` (the latter from `org.hibernate.validator.constraints`). `@NotBlank` rather than `@NotNull` so `""` is rejected too.
+   - `CreateLinkResponse(String shortCode, String shortUrl)`.
+   - `POST /api/links` with `@Valid @RequestBody` → `@ResponseStatus(HttpStatus.CREATED)`. **`@Valid` is the trigger** — constraint annotations do nothing without it, and a failure becomes a `400` before your method body runs.
+   - `GET /{shortCode}` → `ResponseEntity.status(HttpStatus.FOUND).location(URI.create(target)).build()`. 302 preserves click analytics; know why 301 suits the pure load-reduction case.
+   - **Constrain the catch-all:** `@GetMapping("/{shortCode:[0-9a-zA-Z]{5,16}}")`. A bare `/{shortCode}` swallows `/favicon.ico`, `/robots.txt`, and every typo, hitting the database for each. `/api/**` still wins (Spring prefers the more specific pattern) and `/actuator/**` is mapped separately.
+   - Build `shortUrl` from config, not a hardcoded host — add `app.base-url: http://localhost:8081` to `application.yaml` and inject with `@Value("${app.base-url}")`. Stage 3 puts a load balancer on a different port.
+   > **Dev-only convenience:** Boot hides exception messages and field errors from error responses, so a `400` says only `"Bad Request"`. Set `server.error.include-message: always` and `server.error.include-binding-errors: always` while building. Replace with a `@RestControllerAdvice` in Stage 5.
 6. **Tests:**
-   - Unit-test `Base62` with **plain JUnit** — it's a pure static function, so no `@SpringBootTest` (that would boot the whole app and require Postgres for nothing).
-   - Integration test with **Testcontainers 2.x**: add `org.testcontainers:testcontainers-postgresql`, `org.testcontainers:testcontainers-junit-jupiter`, and Boot's `spring-boot-testcontainers`. Mind the 2.x renaming (§2.1) — tutorials will tell you the artifact is just `postgresql`.
-   - Annotate the container field with **`@ServiceConnection`** and Boot wires the datasource URL and credentials automatically. Older guides use `@DynamicPropertySource` with three `registry.add(...)` calls; you don't need that.
-   - Assert the whole slice: create a link, then follow the redirect with MockMvc and check the `Location` header. This test also proves your Flyway migration and entity agree.
+   - Unit-test `Base62` with **plain JUnit** — a pure static function needs no `@SpringBootTest` (which would boot the app and require Postgres to test arithmetic). Cover `encode(0)`, the alphabet boundaries (`10`→`a`, `35`→`z`, `36`→`A`, `61`→`Z`), the rollover at `62`→`"10"` (where a missing `.reverse()` dies), and injectivity over a range via a `Set`.
+   - **Integration test with Testcontainers 2.x** — dependencies `spring-boot-testcontainers`, `org.testcontainers:testcontainers-postgresql`, `org.testcontainers:testcontainers-junit-jupiter`, all `<scope>test</scope>` and all version-managed by the parent. Mind the 2.x renaming and the new package (§2.1).
+   - Annotate the container field `@Container @ServiceConnection` and make it **`static`** (one container per class; an instance field starts a fresh Postgres per test method). `@ServiceConnection` reads the container's randomly-assigned port and overrides `spring.datasource.*` — no `@DynamicPropertySource` needed.
+   - Drive it with `MockMvc` (`@AutoConfigureMockMvc`), which exercises routing, JSON binding, validation, and exception mapping without opening a socket. Assert `201` on create, then follow the code and assert the `Location` header on the `302`.
+   - **Do not** put `@Transactional` on this test — you want the data actually committed so the second request reads it back. Isolation comes from the disposable container, not from rollback.
+   > **Why this test earns its place even though `curl` already worked:** tests that hit your *dev* database never re-run your migrations (Flyway sees "already at version 2"), so a broken `V1__init.sql` would go unnoticed. A fresh container applies every migration from zero. Watch for `Migrating schema "public" to version "1 - init"` in the log — that line is the proof.
+   > **Also beware the test that never flushes.** A `@Transactional` service test that only asserts on in-memory objects sends **no SQL at all**, so it passes while the insert would be rejected. Always include one test that queries after writing.
+   > **CI note:** any test pointing at your hand-started Postgres (port 5434) will fail in GitHub Actions. Before Stage 5, move them onto a shared abstract base class holding the `@Container` field.
 7. Manual smoke test (port **8081** — see the note in Stage 0):
    ```bash
    curl -X POST localhost:8081/api/links -H 'Content-Type: application/json' \
