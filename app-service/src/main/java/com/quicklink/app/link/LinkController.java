@@ -33,12 +33,17 @@ public class LinkController {
                                       baseUrl + "/" + link.getShortCode());
     }
 
+    @GetMapping("/api/links/{shortCode}/stats")
+    public LinkStatsResponse stats(@PathVariable String shortCode) {
+        return new LinkStatsResponse(shortCode, linkService.clickCount(shortCode));
+    }
+
     @GetMapping("/{shortCode:[0-9a-zA-Z]{5,16}}")
     public ResponseEntity<Void> redirect(@PathVariable String shortCode) {
-        Link link = linkService.resolve(shortCode);
+        String targetUrl = linkService.resolveTargetUrl(shortCode);
 
         return ResponseEntity.status(HttpStatus.FOUND)
-                             .location(URI.create(link.getTargetUrl()))
+                             .location(URI.create(targetUrl))
                              .build();
     }
 }

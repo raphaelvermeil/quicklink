@@ -16,12 +16,23 @@ spring:
     properties:
       hibernate:
         format_sql: true
+  data:
+    redis:
+      host: localhost
+      port: 6380
 
 management:
   endpoints:
     web:
       exposure:
         include: health,info
+  endpoint:
+    health:
+      show-details: always
+
 
 app:
   base-url: http://localhost:8081
+  rate-limit:
+    capacity: 10
+    window-seconds: 60

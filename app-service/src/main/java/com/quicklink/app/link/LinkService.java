@@ -3,14 +3,78 @@ package com.quicklink.app.link;
 import java.time.Instant;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import java.time.Duration;
+import java.util.Optional;
+import org.springframework.data.redis.core.StringRedisTemplate;
 
 @Service
 public class LinkService {
 
-    private final LinkRepository linkRepository;
 
-    public LinkService(LinkRepository linkRepository) {
+    private static final String KEY_PREFIX  = "link:code:";
+    private static final String MISSING     = "__missing__";
+    private static final Duration MAX_TTL     = Duration.ofHours(1);
+    private static final Duration MISSING_TTL = Duration.ofSeconds(30);
+
+    private final LinkRepository linkRepository;
+    private final LinkStatsRepository statsRepository;
+    private final StringRedisTemplate redis;
+
+    public LinkService(LinkRepository linkRepository,
+                       LinkStatsRepository statsRepository,
+                       StringRedisTemplate redis) {
         this.linkRepository = linkRepository;
+        this.statsRepository = statsRepository;
+        this.redis = redis;
+    }
+
+
+    public String resolveTargetUrl(String shortCode) {
+        String key = KEY_PREFIX + shortCode;
+
+        String cached = redis.opsForValue().get(key);
+        if (MISSING.equals(cached)) {
+            throw new LinkNotFoundException(shortCode);
+        }
+        if (cached != null) {
+            recordClick(shortCode);
+            return cached;
+        }
+
+        Optional<Link> found = linkRepository.findByShortCode(shortCode);
+        if (found.isEmpty() || isExpired(found.get())) {
+            redis.opsForValue().set(key, MISSING, MISSING_TTL);   // negative cache
+            throw new LinkNotFoundException(shortCode);
+        }
+
+
+        Link link = found.get();
+        Duration ttl = cacheTtlFor(link);
+        if (ttl.isPositive()) {
+            redis.opsForValue().set(key, link.getTargetUrl(), ttl);
+        }
+
+
+        recordClick(shortCode);
+        return link.getTargetUrl();
+    }
+
+    private void recordClick(String shortCode) {
+        redis.opsForValue().increment(ClickCounters.counterKey(shortCode));
+        redis.opsForSet().add(ClickCounters.DIRTY_SET, shortCode);
+    }
+
+
+    private boolean isExpired(Link link) {
+        return link.getExpiresAt() != null && link.getExpiresAt().isBefore(Instant.now());
+    }
+
+    private Duration cacheTtlFor(Link link) {
+        if (link.getExpiresAt() == null) {
+            return MAX_TTL;
+        }
+        Duration untilExpiry = Duration.between(Instant.now(), link.getExpiresAt());
+        return untilExpiry.compareTo(MAX_TTL) < 0 ? untilExpiry : MAX_TTL;
     }
 
     @Transactional
@@ -36,4 +100,20 @@ public class LinkService {
         }
         return link;
     }
+
+    @Transactional(readOnly = true)
+    public long clickCount(String shortCode) {
+        if (linkRepository.findByShortCode(shortCode).isEmpty()) {
+            throw new LinkNotFoundException(shortCode);
+        }
+
+        long persisted = statsRepository.findById(shortCode)
+                .map(LinkStats::getClicks)
+                .orElse(0L);
+
+        String pending = redis.opsForValue().get(ClickCounters.counterKey(shortCode));
+
+        return persisted + (pending == null ? 0L : Long.parseLong(pending));
+    }   
+
 }
