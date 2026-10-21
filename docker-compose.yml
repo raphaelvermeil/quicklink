@@ -7,15 +7,34 @@ services:
       POSTGRES_PASSWORD: quicklink
     ports: ["5434:5432"]
     volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U quicklink"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
 
   redis:
     image: redis:7
     ports: ["6380:6379"]
 
+  app:
+    build:
+      context: .                           # repo root: Maven needs mvnw, .mvn/, parent pom
+      dockerfile: app-service/Dockerfile
+    environment:
+      # Inside a container 'localhost' means the container itself, so point at the
+      # compose service names and their INTERNAL ports. These override application.yaml.
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/quicklink
+      SPRING_DATA_REDIS_HOST: redis
+      SPRING_DATA_REDIS_PORT: 6379
+      APP_BASE_URL: http://localhost:8082
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_started }
+    # No fixed host port: three instances cannot all bind the Mac's 8082. Publishing
+    # just the container port lets Docker assign a random host port per instance,
+    # which keeps each one individually reachable while scaled.
+    # Once edge-lb fronts them, drop this entirely so instances stay private.
+    ports: ["8081"]
+
 volumes: { pgdata: {} }
-
-
-
-
-  
-
