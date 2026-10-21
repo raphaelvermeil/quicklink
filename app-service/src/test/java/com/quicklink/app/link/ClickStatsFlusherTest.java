@@ -1,9 +1,11 @@
 package com.quicklink.app.link;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.time.Duration;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -20,11 +22,14 @@ class ClickStatsFlusherTest {
     @Autowired LinkStatsRepository statsRepository;
     @Autowired StringRedisTemplate redis;
 
+    private static final String LOCK_KEY = "stats:flush:lock";
+
     @BeforeEach
     void clearPendingWork() {
         // Redis does not roll back with the test transaction, so drop any dirty
         // codes left behind by other tests before exercising the flusher.
         redis.delete(ClickCounters.DIRTY_SET);
+        redis.delete(LOCK_KEY);
     }
 
     private void seedCounter(String code, long count) {
@@ -73,5 +78,41 @@ class ClickStatsFlusherTest {
         redis.delete(ClickCounters.DIRTY_SET);
 
         flusher.flush();   // must not throw
+    }
+
+    // ---------------------------------------------------------------------
+    // Multi-instance safety. @Scheduled fires on every instance, so the flush
+    // must be guarded by a lock that exactly one instance can hold per cycle.
+    // ---------------------------------------------------------------------
+
+    @Test
+    void skipsFlushWhileAnotherInstanceHoldsTheLock() {
+        String code = linkService.createLink("https://example.com/locked", null).getShortCode();
+        seedCounter(code, 6);
+
+        // simulate a different instance already flushing
+        redis.opsForValue().set(LOCK_KEY, "some-other-instance", Duration.ofSeconds(30));
+
+        flusher.flush();
+
+        assertEquals("6", redis.opsForValue().get(ClickCounters.counterKey(code)),
+                     "counter must NOT be drained while another instance holds the lock");
+        assertTrue(statsRepository.findById(code).isEmpty(),
+                   "nothing should have been written to Postgres");
+
+        redis.delete(LOCK_KEY);
+        redis.delete(ClickCounters.counterKey(code));
+    }
+
+    @Test
+    void releasesTheLockAfterFlushing() {
+        String code = linkService.createLink("https://example.com/unlocked", null).getShortCode();
+        seedCounter(code, 2);
+
+        flusher.flush();
+
+        assertFalse(Boolean.TRUE.equals(redis.hasKey(LOCK_KEY)),
+                    "the lock must be released so the next cycle can run");
+        assertEquals(2L, statsRepository.findById(code).orElseThrow().getClicks());
     }
 }

@@ -1,5 +1,6 @@
 package com.quicklink.app.link;
 
+import java.time.Duration;
 import java.util.Set;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -13,6 +14,13 @@ public class ClickStatsFlusher {
 
     private static final Logger log = LoggerFactory.getLogger(ClickStatsFlusher.class);
 
+    private static final String LOCK_KEY = "stats:flush:lock";
+
+    /** Safety net only: the normal path releases the lock in a finally block. */
+    private static final Duration LOCK_TTL = Duration.ofSeconds(60);
+
+    private final String instanceId = System.getenv().getOrDefault("HOSTNAME", "local");
+
     private final StringRedisTemplate redis;
     private final LinkStatsRepository statsRepository;
 
@@ -21,9 +29,26 @@ public class ClickStatsFlusher {
         this.statsRepository = statsRepository;
     }
 
+    /**
+     * @Scheduled fires on EVERY instance, so three app instances would race to drain the
+     * same Redis counters. SET NX lets exactly one instance win each cycle; the others
+     * return immediately.
+     */
     @Scheduled(fixedDelayString = "${app.stats.flush-interval-ms:60000}")
     @Transactional
     public void flush() {
+        Boolean won = redis.opsForValue().setIfAbsent(LOCK_KEY, instanceId, LOCK_TTL);
+        if (!Boolean.TRUE.equals(won)) {
+            return;                       // another instance is flushing this cycle
+        }
+        try {
+            drainCounters();
+        } finally {
+            redis.delete(LOCK_KEY);
+        }
+    }
+
+    private void drainCounters() {
         Set<String> codes = redis.opsForSet().members(ClickCounters.DIRTY_SET);
         if (codes == null || codes.isEmpty()) {
             return;
