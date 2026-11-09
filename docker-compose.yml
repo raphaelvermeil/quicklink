@@ -27,14 +27,39 @@ services:
       SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/quicklink
       SPRING_DATA_REDIS_HOST: redis
       SPRING_DATA_REDIS_PORT: 6379
-      APP_BASE_URL: http://localhost:8082
+      # Clients enter through edge-lb, so that is the host a short link must point at.
+      APP_BASE_URL: http://localhost:8080
+      # Trust X-Forwarded-For, which edge-lb sets. Safe ONLY because the instances are
+      # no longer published to the host: the single way in is through the proxy.
+      SERVER_FORWARD_HEADERS_STRATEGY: framework
     depends_on:
       postgres: { condition: service_healthy }
       redis: { condition: service_started }
-    # No fixed host port: three instances cannot all bind the Mac's 8082. Publishing
-    # just the container port lets Docker assign a random host port per instance,
-    # which keeps each one individually reachable while scaled.
-    # Once edge-lb fronts them, drop this entirely so instances stay private.
-    ports: ["8081"]
+    # Deliberately no 'ports': app instances are private. Reaching them from the host
+    # would both bypass the balancer and let a client spoof X-Forwarded-For.
+    #
+    # Declared here rather than passed as --scale app=3: the CLI flag is not persisted,
+    # so any later 'docker compose up' would silently scale back down to one instance.
+    deploy:
+      replicas: 3
+
+  edge-lb:
+    build:
+      context: .
+      dockerfile: edge-lb/Dockerfile
+    environment:
+      # Container names, not host ports: a restarted container keeps its name but gets
+      # a fresh host port, which is what stopped a recovered instance rejoining before.
+      EDGE_BACKENDS: quicklink-app-1:8081,quicklink-app-2:8081,quicklink-app-3:8081
+      # Measured on this workload (uniform, fast requests):
+      #   ROUND_ROBIN       sequential 10/10/10   concurrent ~10/10/10
+      #   LEAST_CONNECTIONS sequential 30/0/0     concurrent  8/7/15
+      # Least-connections ties at 0 in-flight under sequential load and min() always
+      # returns the first backend, so it degenerates to "always pick the first". It
+      # earns its keep when request durations vary; here round-robin is strictly better.
+      EDGE_STRATEGY: ROUND_ROBIN
+    depends_on:
+      app: { condition: service_started }
+    ports: ["8080:8080"]
 
 volumes: { pgdata: {} }

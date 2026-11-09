@@ -23,6 +23,7 @@
 
   <modules>
     <module>app-service</module>
-    <!-- worker and edge-lb get added in Stages 4 and 3 -->
+    <module>edge-lb</module>
+    <!-- worker gets added in Stage 4 -->
   </modules>
 </project>
