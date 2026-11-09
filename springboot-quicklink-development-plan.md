@@ -32,11 +32,11 @@ The single most important habit throughout: **every app instance must be statele
 | Cache            | **Redis 7 (Lettuce client)** | Cache-aside on redirects, click counters, rate-limit buckets. |
 | Rate limiting    | **Bucket4j + Redis** | Distributed token bucket that works across instances. Version-check against Boot 4 when you get there (§2.1). |
 | Queue            | **RabbitMQ + Spring AMQP** (`spring-boot-starter-amqp`) | Media compression jobs, retries, dead-letter queue. |
-| Object storage   | **MinIO** (S3-compatible, self-hosted) + **AWS SDK v2 S3 client** | Learn the S3 API locally with no cloud bill; swap to real S3 later by changing config. |
+| Object storage   | **SeaweedFS** (S3-compatible, self-hosted) + **AWS SDK v2 S3 client** | Learn the S3 API locally with no cloud bill; swap to real S3 by changing one endpoint. **MinIO was the original choice but its community images are no longer publicly pullable** — see Stage 4 step 1. The application code is identical either way. |
 | Image processing | **Thumbnailator** | Simple, dependable image resize/recompress. (ffmpeg for video is a stretch goal.) |
 | Load balancer    | **Plain Java** (JDK `HttpServer` + `java.net.http.HttpClient`, virtual threads) — **no Spring** | The point is to see the mechanism. Keep it thin. |
-| Containers       | **Docker + Docker Compose** | Postgres, Redis, RabbitMQ, MinIO, N app instances, the LB — all wired together. |
-| Testing          | **JUnit 5, Testcontainers 2.x, Mockito, MockMvc** | Testcontainers spins up real Postgres/Redis/Rabbit/MinIO in tests — a strong signal. **2.x renamed its modules** (§2.1). |
+| Containers       | **Docker + Docker Compose** | Postgres, Redis, RabbitMQ, SeaweedFS, N app instances, N workers, the LB — all wired together. |
+| Testing          | **JUnit 5, Testcontainers 2.x, Mockito, MockMvc** | Testcontainers spins up real Postgres/Redis/Rabbit/SeaweedFS in tests — a strong signal. **2.x renamed its modules** (§2.1). SeaweedFS has no Testcontainers module; a `GenericContainer` works. |
 | API docs         | **springdoc-openapi** | Free Swagger UI at `/swagger-ui.html`. Needs a Boot 4-compatible release (§2.1). |
 | Observability    | **Actuator + Micrometer + Prometheus** (+ Grafana, optional) | `/actuator/health` is what your LB polls; metrics make the async pipeline visible. |
 | CI               | **GitHub Actions** | Build + test on every push. |
@@ -54,7 +54,13 @@ This project runs **Spring Boot 4.1** (Spring Framework 7.0). Virtually every tu
 | Testcontainers 1.x — `org.testcontainers:postgresql`, `:junit-jupiter` | Testcontainers **2.x** — `org.testcontainers:testcontainers-postgresql`, `:testcontainers-junit-jupiter` |
 | `org.testcontainers.containers.PostgreSQLContainer<?>` (generic) | `org.testcontainers.postgresql.PostgreSQLContainer` — **new package, and no longer generic** (write `new PostgreSQLContainer("postgres:16")`, no diamond). The old `containers.*` class still exists for compatibility, and your IDE will offer it first. |
 | `@AutoConfigureMockMvc` in `org.springframework.boot.test.autoconfigure.web.servlet` | `org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc` — Boot 4 split the monolithic test-autoconfigure module per technology |
+| `Jackson2JsonMessageConverter` (spring-amqp) | **`JacksonJsonMessageConverter`** — spring-amqp 4 ships one class per Jackson generation, and Boot 4 is on Jackson 3. Pick wrong and messages are Java-serialized instead of JSON. |
+| `spring.rabbitmq.listener.simple.retry.max-attempts` = total attempts | **counts RETRIES**, so `3` means 4 total attempts. Boot 4 uses Spring Framework 7's new `core.retry`, not spring-retry. *(Measured, Stage 4e.)* |
 | Spring Framework 6 | Spring Framework 7 |
+
+**Not transitive in a non-web module:** `spring-boot-starter-amqp` + `spring-boot-starter-jdbc` do **not** bring Jackson. The `worker` module needs an explicit `spring-boot-starter-jackson`, or the AMQP JSON converter fails at startup with `NoClassDefFoundError: tools/jackson/core/JacksonException`.
+
+**Not managed by the Boot BOM at all:** the **AWS SDK v2** (import `software.amazon.awssdk:bom` into your own `dependencyManagement`), **Thumbnailator**, and **Bucket4j** — these need explicit versions.
 
 **Unchanged**, despite what you might expect: `spring-boot-starter-data-jpa`, `spring-boot-starter-data-redis`, `spring-boot-starter-amqp`, `spring-boot-starter-actuator`, `spring-boot-starter-validation`, and `@ServiceConnection` (still `org.springframework.boot.testcontainers.service.connection.ServiceConnection`).
 
@@ -82,20 +88,22 @@ quicklink/
 │       ├── redirect/           # GET /{code}
 │       ├── ratelimit/
 │       └── config/
-│   └── src/main/resources/db/migration/   # Flyway V1__..., V2__...
+│   └── src/main/resources/db/migration/   # Flyway V1__init, V2__link_code_seq, V3__link_stats, V4__media
 │
 ├── worker/                     # Spring Boot: RabbitMQ consumer, does compression
 │   ├── pom.xml
 │   ├── Dockerfile
 │   └── src/main/java/com/quicklink/worker/...
 │
-└── edge-lb/                    # plain Java L7 load balancer (no Spring)
+└── edge-lb/                    # plain Java L7 load balancer (no Spring, zero deps)
     ├── pom.xml
     ├── Dockerfile
-    └── src/main/java/com/quicklink/lb/...
+    └── src/main/java/com/quicklink/edge/...
 ```
 
-`app-service` and `worker` share the same Postgres and MinIO; `worker` can start as a Spring profile _inside_ `app-service` if you want to move faster, then split into its own module once it works. Splitting it out is what lets you scale workers independently — which is the whole reason a queue exists.
+> **Every module's Dockerfile needs every module's `pom.xml`.** The build context is the repo root (Maven needs `mvnw`, `.mvn/` and the parent pom), and the parent lists all modules — so Maven cannot build the reactor unless each declared module's pom is present, even for modules that image never compiles. Adding a module silently breaks the other modules' Docker builds until you add the `COPY`.
+
+`app-service` and `worker` share the same Postgres and object store; `worker` can start as a Spring profile _inside_ `app-service` if you want to move faster, then split into its own module once it works. Splitting it out is what lets you scale workers independently — which is the whole reason a queue exists.
 
 ---
 
@@ -318,10 +326,13 @@ Each stage produces something you can run and demo. Build the vertical slice fir
 
 **Goal:** run several app instances and route to them through a load balancer you wrote. This is the backbone that unifies the project.
 
-1. **Make the app provably stateless.** No in-memory session, no local counters, no local file writes — everything in Postgres/Redis. Add a `Dockerfile` to `app-service` and confirm you can run several copies:
-   ```bash
-   docker compose up -d --scale app=3    # (after wiring 'app' into compose)
-   ```
+1. **Make the app provably stateless.** No in-memory session, no local counters, no local file writes — everything in Postgres/Redis. Audit for mutable `static` fields, non-final instance fields outside entities, `HttpSession`, local file writes, and in-memory collections held as beans.
+   - **A `@Scheduled` job is not state, but it is still broken by scaling:** it fires on *every* instance, so three copies race to drain the same Redis counters. Guard it with a Redis lock — `SET stats:flush:lock <id> NX EX 60` — so exactly one instance wins each cycle. That is leader election in one line.
+   - **Multi-module Docker gotcha:** the build context must be the **repo root** (Maven needs `mvnw`, `.mvn/` and the parent pom), and *every* module's Dockerfile must `COPY` *every* declared module's `pom.xml` — otherwise Maven cannot build the reactor and fails with `Child module /build/x of /build/pom.xml does not exist`. Adding a module later breaks the other modules' builds until you do this.
+   - **Config:** do not edit `application.yaml` for containers. Inside a container `localhost` means *the container itself*, so override with environment variables (`SPRING_DATASOURCE_URL`, `SPRING_DATA_REDIS_HOST`, `APP_BASE_URL`) pointing at compose service names and their **internal** ports. One image, configured by its environment.
+   - **Startup ordering:** plain `depends_on` only waits for a container to *start*. Add a `healthcheck` (`pg_isready -U quicklink`) plus `condition: service_healthy`, or the app races Postgres and dies.
+   - **Scale declaratively.** `--scale app=3` is a CLI flag and is **not persisted**: any later `docker compose up` silently scales back to one instance (it will delete app-2 and app-3 without comment). Put `deploy: { replicas: 3 }` in the compose file instead.
+   - Add an instance-id response header now (a one-line `OncePerRequestFilter` reading `HOSTNAME`); without it three instances are indistinguishable and the step-4 demo has nothing to show.
 2. **Build `edge-lb`** as a plain-Java Maven module (no Spring). Recommended shape: JDK `HttpServer` for the listener, `java.net.http.HttpClient` to forward, and a **virtual-thread-per-request** executor.
    - **Backend pool:** a config list of `host:port` for the app instances.
    - **Reverse proxy:** on each incoming request, pick a healthy backend, copy method + path + headers + body, forward, then stream the response back to the client.
@@ -341,11 +352,25 @@ Each stage produces something you can run and demo. Build the vertical slice fir
      });
      ```
    - **Algorithm — start with round-robin:** an `AtomicInteger` index modulo the list of _healthy_ backends.
-   - **Then add least-connections:** track an `AtomicInteger inFlight` per backend (see sketch) and pick the healthy backend with the smallest value. This is a great before/after to show in the README.
-   - **Health checks:** a `ScheduledExecutorService` that every ~5s does `GET http://backend/actuator/health` on each backend; `200` → mark healthy, anything else → mark unhealthy and stop routing to it. When it passes again, put it back in rotation.
-   - **Failover:** the selection step only ever considers healthy backends, so a dead instance is skipped automatically.
+   - **Then add least-connections:** track an `AtomicInteger inFlight` per backend (see sketch) and pick the healthy backend with the smallest value.
+     - **Measured on this workload, least-connections is *worse*:** with uniform fast requests every backend ties at 0 in-flight and `min()` deterministically returns the first, so it degenerates to "always pick the first".
+       | strategy | 30 sequential | 30 concurrent |
+       | --- | --- | --- |
+       | round-robin | 10 / 10 / 10 | ~even |
+       | least-connections | **30 / 0 / 0** | 8 / 7 / 15 |
+     - Keep both behind a config switch and default to round-robin. The README story is stronger this way: you implemented it, measured it, and chose against it — least-connections earns its keep when request *durations* vary, which this workload does not have. (A random or round-robin tie-break would fix the skew.)
+   - **Health checks:** a `ScheduledExecutorService` that every ~5s probes each backend; `200` → healthy, anything else → unhealthy and out of rotation. When it passes again, put it back.
+     - Probe **`/actuator/health/readiness`**, not `/actuator/health`. The aggregate folds in Postgres and Redis, so a Redis blip would evict a perfectly serviceable instance — cache-aside degrades to Postgres and keeps working. Boot's `readiness` group contains only `readinessState`, which is the right question: *can this instance take traffic?*
+   - **Failover needs retry, not just health checks.** The claim that "selection only considers healthy backends, so a dead instance is skipped" is only true for requests *after* detection. **Measured:** killing one of three instances produced **20 failures out of 60**, because all 60 requests completed inside one 5-second check interval. Add retry-on-failure — a failed forward marks that backend unhealthy *immediately* and retries another — and the same test gives **90/90 successes**. The periodic checker then handles putting it back.
+   - **Address backends by container name, not host port.** `docker start` assigns a **new** random host port, so an LB pointed at host ports can never see a recovered instance rejoin (it keeps probing a port that no longer exists). Put `edge-lb` inside the compose network and use `quicklink-app-1:8081` etc.; names survive restarts. Then drop the app instances' host ports entirely so the proxy is the only way in.
+   - **Hop-by-hop headers must not be forwarded** (`Connection`, `Keep-Alive`, `Transfer-Encoding`, `TE`, `Upgrade`), and `HttpClient` *throws* if you try to set the ones it manages (`Host`, `Content-Length`, `Date`, `Expect`, `From`, `Via`, `Warning`). Filter both sets.
+   - **`followRedirects(NEVER)`** on the forwarding client. This app's whole purpose is returning 302s; a client that follows them would fetch the target itself and hand the caller a 200 with someone else's page.
+   - **`version(HTTP_1_1)`** too, or `HttpClient` adds `Connection: Upgrade` / `HTTP2-Settings` to every request trying to negotiate h2c.
+   - Use **8080**, not port 80 as the sketch above shows — binding 80 needs root.
 3. Put the LB in compose in front of the app instances; point your `curl`/browser at the LB's port.
-4. **Demo the payoff:** hit the LB repeatedly and watch responses rotate across instances (add an instance-id header to prove it); then `docker kill` one instance and confirm requests keep succeeding with zero client-visible errors; bring it back and watch it rejoin.
+4. **Demo the payoff:** hit the LB repeatedly and watch responses rotate across instances (the instance-id header proves it); then `docker kill` one instance and confirm requests keep succeeding with **zero** client-visible errors; bring it back and watch it rejoin (~7s with a 5s probe interval).
+5. **Now enable `server.forward-headers-strategy: framework`** on the app — and not before. `edge-lb` sets `X-Forwarded-For`, and without this the rate limiter keys every request on the *proxy's* IP, so all users share one bucket. Enable it at the same moment you remove the instances' host ports: the header is trustworthy only when the proxy is the only way in, otherwise any client can spoof it for a fresh bucket.
+   - Verify by sending `X-Forwarded-For: 203.0.113.50` and checking that Redis grows a `rate:ip:203.0.113.50` key.
 
 **Deliverable:** a horizontally scaled service behind a load balancer you built. In your README, be explicit: _"I built this to understand what nginx/HAProxy do for me"_ — that framing turns it into a strength.
 
@@ -355,52 +380,104 @@ Each stage produces something you can run and demo. Build the vertical slice fir
 
 **Goal:** a short code can point to an uploaded file that's compressed in the background and served from object storage.
 
-1. Add **RabbitMQ** and **MinIO** to compose:
+1. Add **RabbitMQ** and an **S3-compatible object store** to compose.
+
+   > **MinIO is no longer usable for this.** Its community images are not publicly pullable any more: Docker Hub answers `object not found` for `minio/minio`, quay.io returns 401, and `bitnami/minio` is also gone. `localstack/localstack:latest` starts and then **exits with code 55** demanding a licence. Checked alternatives that do work: **SeaweedFS** (a real distributed object store with an S3 gateway) and **adobe/s3mock** (a test mock, 223MB). This project uses SeaweedFS. **Your application code is identical either way** — AWS SDK v2 pointed at a custom endpoint — so the choice only affects compose.
+
    ```yaml
    rabbitmq:
      image: rabbitmq:3-management
-     ports: ["5672:5672", "15672:15672"] # 15672 = web UI
-   minio:
-     image: minio/minio
-     command: server /data --console-address ":9001"
-     environment:
-       MINIO_ROOT_USER: minio
-       MINIO_ROOT_PASSWORD: minio123
-     ports: ["9000:9000", "9001:9001"]
+     ports: ["5672:5672", "15672:15672"]   # 15672 = web UI, worth watching
+     healthcheck:
+       test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+       interval: 5s
+       retries: 20
+
+   seaweedfs:
+     image: chrislusf/seaweedfs:4.53
+     command: server -s3 -dir=/data
+     ports: ["8333:8333"]                  # the S3 API
+     volumes: [seaweeddata:/data]
+     healthcheck:
+       test: ["CMD-SHELL", "curl -sf http://localhost:8333/ > /dev/null"]
+       interval: 5s
+       retries: 20
    ```
-   Create two buckets on startup: `originals` and `processed`.
-2. **`media_asset` table** (Flyway `V2__media.sql`):
+
+   Create the `originals` and `processed` buckets with a one-shot init container — buckets are **not** auto-created, and a `PutObject` to a missing bucket fails (SeaweedFS reports it as **403 Access Denied**, not 404, which is a misleading error to debug).
+
+   > **Make bucket creation idempotent.** Compose re-runs one-shot containers on every `up`. SeaweedFS answers `200` for a new bucket and **`409 BucketAlreadyOwnedByYou`** for an existing one, so a plain `curl -f -X PUT` fails on every run after the first. Accept both codes. This same trap bites again in both Testcontainers tests later — anything that creates a bucket more than once must tolerate the 409.
+
+2. **`media_asset` table** — Flyway **`V4__media.sql`**, not `V2`: Stage 1 and 2 already used `V2` and `V3`, and Flyway refuses to start on a duplicate version.
+
    ```sql
    CREATE TABLE media_asset (
-     id             BIGSERIAL PRIMARY KEY,
-     status         VARCHAR(12) NOT NULL,   -- PENDING | PROCESSING | READY | FAILED
-     content_type   VARCHAR(64) NOT NULL,
-     original_key   TEXT NOT NULL,
-     processed_key  TEXT,
-     original_bytes BIGINT,
+     id              BIGSERIAL PRIMARY KEY,
+     status          VARCHAR(12) NOT NULL,   -- PENDING | PROCESSING | READY | FAILED
+     content_type    VARCHAR(64) NOT NULL,
+     original_key    TEXT        NOT NULL,
+     processed_key   TEXT,
+     original_bytes  BIGINT,
      processed_bytes BIGINT,
-     error_message  TEXT,
-     created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
-     updated_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+     error_message   TEXT,
+     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+     updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
    );
+
+   -- link.media_asset_id has existed since V1 but could not be constrained then.
+   ALTER TABLE link ADD CONSTRAINT link_media_asset_fk
+     FOREIGN KEY (media_asset_id) REFERENCES media_asset (id);
    ```
+
+   - **`BIGSERIAL`/`IDENTITY` is right here, unlike `link` in Stage 1** — and for the opposite reason. There the value had to exist *before* the insert, because `short_code` was derived from it and `NOT NULL`. Here the id is needed *after* the insert, to point `link.media_asset_id` at it and to put in the queue message. Identity generation gives you exactly that.
+   - Map `status` with `@Enumerated(EnumType.STRING)`, and `updated_at` with Hibernate's **`@UpdateTimestamp`** — a DB `DEFAULT now()` only fires on insert, but this column has to move on every status transition. (Cost: it then comes from the app's clock, not the database's.)
+
 3. **Upload endpoint** (`POST /api/media`, multipart):
-   - Stream the file straight to MinIO `originals/{uuid}` (don't buffer big files in memory).
-   - Insert `media_asset` with status `PENDING`; create a `link` row (`target_type = 'MEDIA'`).
-   - **Publish a job** `{ assetId, originalKey }` to RabbitMQ queue `media.compress`.
-   - Return **202 Accepted** with `{ shortCode, status: "PENDING" }` immediately. The HTTP request stays short-lived; the heavy work happens off the request thread.
+   - Upload to `originals/{uuid}` **before** writing any rows, so a failed upload leaves no row pointing at a missing object. `RequestBody.fromInputStream(...)` keeps the file off the heap — though note Spring has *already* buffered the multipart to a temp file by then, so this is disk-buffered, not end-to-end streamed.
+   - **Raise `spring.servlet.multipart.max-file-size`** — Boot's default is **1MB** and will reject almost any real upload.
+   - **`forcePathStyle(true)`** on the `S3Client`, or the SDK builds virtual-host URLs like `http://originals.seaweedfs:8333/key` which do not resolve.
+   - Insert `media_asset` as `PENDING`, then the `link` row (`target_type = 'MEDIA'`) — that order satisfies the new foreign key.
+   - **Publish the job *after* the transaction commits**, with `@TransactionalEventListener(phase = AFTER_COMMIT)`. Postgres and RabbitMQ share no transaction; publishing inside it risks the worst ordering — message delivered, transaction rolled back, worker handed an asset id that does not exist. Publishing after commit leaves only the *lost message* failure, which strands the asset visibly `PENDING` and is safe to re-drive.
+   - Return **202 Accepted** with `{ shortCode, status: "PENDING" }`. The request ends in ~50ms; the heavy work happens elsewhere.
+
 4. **Worker module** (`@RabbitListener` on `media.compress`):
-   - Set status `PROCESSING`. Download the original from MinIO.
-   - Compress with **Thumbnailator** (e.g. cap dimensions and re-encode at a target quality).
-   - Upload the result to `processed/{uuid}`, set status `READY`, record byte sizes.
-   - **Idempotency:** if the asset is already `READY`, no-op; re-running must be safe (overwrite the processed key). This is the idempotent-worker pattern.
-   - **Retries + dead-letter queue:** configure Spring AMQP retry; after N failures route the message to `media.compress.dlq` and set status `FAILED` with `error_message`. Never let one poison file wedge the queue.
-5. **Serving:** `GET /{shortCode}` for a media link → if `READY`, generate a **presigned MinIO URL** (via `S3Presigner`) and `302` to it; if still `PENDING/PROCESSING`, return `202` or a small "still processing" page. Add `GET /api/media/{code}/status`.
-6. **Scale workers independently** to prove the point of the queue:
-   ```bash
-   docker compose up -d --scale worker=3
-   ```
-7. Tests: Testcontainers for RabbitMQ **and** MinIO; assert an upload transitions PENDING → READY and that a deliberately broken file lands in the DLQ as FAILED.
+   - **Keep the module minimal: `JdbcTemplate`, not JPA.** It only issues a few narrow status `UPDATE`s, so it needs no entities and no Hibernate — which also avoids sharing entity classes between two services. (Cost: the status string literals must stay in step with app-service's enum.)
+   - **Add `spring-boot-starter-jackson` explicitly.** An AMQP + JDBC classpath has no Jackson, and the JSON converter dies at startup with `NoClassDefFoundError: tools/jackson/core/JacksonException`.
+   - **Declare the worker's own copy of the message record and set `converter.setTypePrecedence(TypePrecedence.INFERRED)`.** The producer stamps `__TypeId__: com.quicklink.app.media.MediaCompressJob` — a class this module does not have — and `INFERRED` makes the listener's parameter type win instead. The two services are then coupled by the **JSON shape**, not a Java class, which is the right coupling for queue integration.
+   - Set `PROCESSING`, download the original, compress with **Thumbnailator**, upload to `processed/{uuid}`, set `READY`, record byte sizes.
+   - **Scale down only.** `Thumbnails.size(1024, 1024)` *enlarges* smaller images, so a 512×512 input becomes 1024×1024 and the "compressed" file ends up **bigger** than the original. Compute `scale = min(1.0, MAX / longest_side)` and use `.scale(scale)`.
+   - **Idempotency:** at-least-once delivery means a duplicate is *normal operation, not a bug*. If the asset is already `READY`, log and ack. Also handle a job for an asset that does not exist — ack and drop, since there is nothing to retry.
+   - **Separate permanent from transient failures.** A corrupt file will never succeed: throw `AmqpRejectAndDontRequeueException` so it **skips the retries entirely** and dead-letters immediately. Transient failures (S3 unreachable) get the backoff.
+   - **Retries + DLQ:**
+     ```yaml
+     spring.rabbitmq.listener.simple:
+       retry: { enabled: true, max-attempts: 3, initial-interval: 1s, multiplier: 2 }
+       default-requeue-rejected: false     # ← load-bearing
+     ```
+     `default-requeue-rejected: false` is what stops an exhausted message being requeued forever and wedging the queue. **`max-attempts` counts retries, not total attempts** — measured 4 attempts with waits of 1s/2s/4s (§2.1).
+   - Declare the dead-letter topology (`deadLetterExchange` + `deadLetterRoutingKey`) and put a `@RabbitListener` on the DLQ that marks the asset `FAILED`, so a stuck upload is visible instead of stranded in `PROCESSING`. Guard that update with `AND status <> 'READY'`: a retry can succeed *after* the dead-letter copy is in flight, and overwriting `READY` with `FAILED` would be a lie.
+
+   > **Queue arguments are immutable.** Adding dead-letter settings to an existing queue fails with `PRECONDITION_FAILED - inequivalent arg 'x-dead-letter-exchange'`. You must **stop everything that declares the queue, delete it, then start again** — deleting it while the old containers are still running (e.g. during a slow `--build`) just lets them recreate it without the arguments. Mirror the topology in *both* services: a mismatch is a loud startup failure rather than a silent bug, which is what makes the duplication tolerable.
+
+5. **Serving:** `GET /{shortCode}` for a media link →
+   - `READY` → generate a **presigned URL** (`S3Presigner`) and `302` to it.
+   - `PENDING`/`PROCESSING` → **202**.
+   - `FAILED` → **410 Gone**, not 202 and not 404. The link is real and the upload happened, but it will never be ready; answering 202 tells the client to keep polling for something that will never arrive.
+   - Add `GET /api/media/{code}/status` so a client can poll.
+
+   > **Presign against a *publicly reachable* endpoint.** The app talks to the store as `http://seaweedfs:8333`, but the presigned URL is handed to a **browser** that cannot resolve that hostname — and the signature covers the host, so it cannot be rewritten afterwards. Use a separate `app.s3.public-endpoint` (`http://localhost:8333`) for the presigner only. Note the presigner takes path-style via `serviceConfiguration(S3Configuration...)`, not `forcePathStyle()`.
+
+   > **Do not cache media links.** Their status changes as the worker progresses and a presigned URL expires, so a cached value eventually serves a stale status or a dead signature. Presigning is local HMAC work — no call to the store — so regenerating per request is cheap.
+
+   > **Watch out for cache poisoning while you build this.** Before the media branch exists, `GET /{code}` on a media link runs `redis.set(key, link.getTargetUrl(), ttl)` with a **null** target URL, which Spring Data Redis stores as an empty string. Fixing the code does **not** fix the cached data — the cache then returns `""` and you get a `302` with an empty `Location`. Treat a blank cached value as a miss, never write a blank value, *and* delete the poisoned keys.
+
+6. **Scale workers independently** to prove the point of the queue. Declare it in compose (`deploy: { replicas: 3 }`) rather than `--scale worker=3`, which is not persisted. One queue, three competing consumers: RabbitMQ gives each message to exactly one of them, so 9 uploads land 3/3/3.
+
+7. **Tests** — Testcontainers for RabbitMQ, Postgres **and** the object store (SeaweedFS has no module; a `GenericContainer` with a `Wait.forHttp("/").forPort(8333)` strategy works).
+   - **Publish through the broker, not by calling the listener**, and send app-service's exact wire format including the foreign `__TypeId__` header. That is the only thing that proves the cross-module contract; a direct method call would not notice `TypePrecedence` being removed.
+   - **Apply app-service's real migration files** from the worker test: `Flyway.configure().locations("filesystem:../app-service/src/main/resources/db/migration")`. A hand-copied schema in a test can silently drift from production.
+   - On the app side, a test with **no worker running** is ideal for the `202` branch — the upload simply stays `PENDING`. Then stand in for the worker (write a processed object, flip the status) to cover `302` and `410`.
+   - For the presigned redirect, assert more than the header shape: **fetch the URL and check the bytes come back.** A presigned redirect that does not resolve is worthless.
 
 **Deliverable:** the full async media pipeline — producer/consumer, worker pool, object storage, retries, DLQ, idempotency.
 
@@ -427,10 +504,11 @@ Each stage produces something you can run and demo. Build the vertical slice fir
 | ------ | ------------------------------- | ------------------------------------------------------------ |
 | POST   | `/api/links`                    | Create a short link for an external URL                      |
 | POST   | `/api/media`                    | Upload a file → returns short code, `202`, async compression |
-| GET    | `/{shortCode}`                  | Redirect (link) or serve/redirect to processed media         |
+| GET    | `/{shortCode}`                  | `302` for a URL link; for media `302` (READY), `202` (PENDING/PROCESSING) or `410` (FAILED) |
 | GET    | `/api/links/{shortCode}/stats`  | Click analytics                                              |
 | GET    | `/api/media/{shortCode}/status` | Compression status                                           |
-| GET    | `/actuator/health`              | Health — **polled by the load balancer**                     |
+| GET    | `/actuator/health`              | Aggregate health (includes Postgres + Redis) — for monitoring |
+| GET    | `/actuator/health/readiness`    | **What the load balancer polls** — excludes Postgres/Redis, so a Redis blip does not evict a serviceable instance |
 | GET    | `/actuator/prometheus`          | Metrics scrape endpoint                                      |
 | GET    | `/swagger-ui.html`              | API docs                                                     |
 
@@ -439,7 +517,9 @@ Each stage produces something you can run and demo. Build the vertical slice fir
 ## 7. Testing strategy
 
 - **Unit:** pure logic (Base62, load-balancer selection algorithms, rate-limit math) with plain JUnit + Mockito.
-- **Integration (Testcontainers):** real Postgres, Redis, RabbitMQ, MinIO spun up per test class. Cover: create→redirect, cache hit/miss, rate-limit `429`, upload PENDING→READY, poison file→DLQ→FAILED.
+- **Integration (Testcontainers):** real Postgres, Redis, RabbitMQ and SeaweedFS spun up per test class. Cover: create→redirect, cache hit/miss, rate-limit `429`, upload PENDING→READY, poison file→DLQ→FAILED.
+  - **Isolate *every* datastore, not just the obvious one.** A test that containerises Postgres but still points at your dev Redis is worse than no isolation: it writes state the other tests read, and the failures look random and depend on test ordering. The same applies one level deeper — any component that reads `spring.data.redis.*` **properties** directly escapes `@ServiceConnection`, which only supplies a `ConnectionDetails` *bean*. Inject `DataRedisConnectionDetails` instead.
+  - Anything that creates a bucket must tolerate `409 BucketAlreadyOwnedByYou`, because static containers are shared across a class's tests.
 - **Load-balancer behavior:** start two stub backends, assert round-robin distribution, then kill one and assert requests still succeed (failover), then revive and assert it rejoins.
 
 ---

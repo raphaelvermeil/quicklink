@@ -19,13 +19,16 @@ public class LinkService {
     private final LinkRepository linkRepository;
     private final LinkStatsRepository statsRepository;
     private final StringRedisTemplate redis;
+    private final MediaTargetResolver mediaTargets;
 
     public LinkService(LinkRepository linkRepository,
                        LinkStatsRepository statsRepository,
-                       StringRedisTemplate redis) {
+                       StringRedisTemplate redis,
+                       MediaTargetResolver mediaTargets) {
         this.linkRepository = linkRepository;
         this.statsRepository = statsRepository;
         this.redis = redis;
+        this.mediaTargets = mediaTargets;
     }
 
 
@@ -36,7 +39,10 @@ public class LinkService {
         if (MISSING.equals(cached)) {
             throw new LinkNotFoundException(shortCode);
         }
-        if (cached != null) {
+        // A blank value is treated as a miss, not a hit. An earlier bug cached an
+        // empty string for media links (whose target_url is null), and the fix alone
+        // would not have healed the already-poisoned entries.
+        if (cached != null && !cached.isBlank()) {
             recordClick(shortCode);
             return cached;
         }
@@ -49,8 +55,19 @@ public class LinkService {
 
 
         Link link = found.get();
+
+        // MEDIA links are deliberately NOT cached. Their status changes as the worker
+        // progresses, and the presigned URL they resolve to expires. Caching either
+        // would eventually serve a stale status or a dead signature.
+        if (link.getTargetType() == TargetType.MEDIA) {
+            String mediaUrl = mediaTargets.resolveMediaUrl(link.getMediaAssetId())
+                    .orElseThrow(() -> new MediaNotReadyException(shortCode));
+            recordClick(shortCode);
+            return mediaUrl;
+        }
+
         Duration ttl = cacheTtlFor(link);
-        if (ttl.isPositive()) {
+        if (ttl.isPositive() && link.getTargetUrl() != null && !link.getTargetUrl().isBlank()) {
             redis.opsForValue().set(key, link.getTargetUrl(), ttl);
         }
 

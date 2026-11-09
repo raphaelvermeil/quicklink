@@ -24,6 +24,6 @@
   <modules>
     <module>app-service</module>
     <module>edge-lb</module>
-    <!-- worker gets added in Stage 4 -->
+    <module>worker</module>
   </modules>
 </project>

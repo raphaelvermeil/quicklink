@@ -8,6 +8,14 @@ spring:
     url: jdbc:postgresql://localhost:5434/quicklink
     username: quicklink
     password: quicklink
+  servlet:
+    multipart:
+      # Boot's default max-file-size is 1MB, which would reject almost any real upload.
+      max-file-size: 25MB
+      max-request-size: 25MB
+  rabbitmq:
+    host: localhost
+    port: 5672
   jpa:
     hibernate:
       ddl-auto: validate
@@ -33,6 +41,19 @@ management:
 
 app:
   base-url: http://localhost:8081
+  s3:
+    endpoint: http://localhost:8333
+    # Used only for presigning. A presigned URL is handed to a browser, which cannot
+    # resolve the compose-internal hostname, and the signature covers the host.
+    public-endpoint: http://localhost:8333
+    presign-ttl: PT15M
+    # SeaweedFS runs without access control here, but the AWS SDK still signs every
+    # request, so it needs credentials to exist.
+    access-key: quicklink
+    secret-key: quicklink-secret
+    buckets:
+      originals: originals
+      processed: processed
   rate-limit:
     capacity: 10
     window-seconds: 60

@@ -17,6 +17,54 @@ services:
     image: redis:7
     ports: ["6380:6379"]
 
+  rabbitmq:
+    image: rabbitmq:3-management
+    ports:
+      - "5672:5672"      # AMQP, what the app and worker speak
+      - "15672:15672"    # management web UI, handy for watching queues fill
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  # S3-compatible object storage. MinIO's community images are no longer publicly
+  # pullable, so this project uses SeaweedFS instead — a real distributed object
+  # store with an S3 gateway. The application code is unchanged either way: AWS
+  # SDK v2 pointed at a custom endpoint.
+  seaweedfs:
+    image: chrislusf/seaweedfs:4.53
+    command: server -s3 -dir=/data
+    ports: ["8333:8333"]   # the S3 API
+    volumes: [seaweeddata:/data]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8333/ > /dev/null"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  # One-shot: creates the two buckets, then exits. Buckets are not auto-created
+  # by the S3 API, so a PutObject to a missing bucket would fail.
+  s3-init:
+    image: curlimages/curl:latest
+    depends_on:
+      seaweedfs: { condition: service_healthy }
+    restart: "no"
+    # Must be idempotent: compose re-runs this on every 'up'. SeaweedFS answers 200
+    # for a new bucket and 409 BucketAlreadyOwnedByYou for an existing one, so plain
+    # 'curl -f' would fail every run after the first.
+    command:
+      - sh
+      - -c
+      - |
+        for b in originals processed; do
+          code=$$(curl -s -o /dev/null -w '%{http_code}' -X PUT "http://seaweedfs:8333/$$b")
+          case "$$code" in
+            200|409) echo "bucket $$b ready ($$code)" ;;
+            *) echo "bucket $$b FAILED ($$code)"; exit 1 ;;
+          esac
+        done
+
   app:
     build:
       context: .                           # repo root: Maven needs mvnw, .mvn/, parent pom
@@ -32,14 +80,44 @@ services:
       # Trust X-Forwarded-For, which edge-lb sets. Safe ONLY because the instances are
       # no longer published to the host: the single way in is through the proxy.
       SERVER_FORWARD_HEADERS_STRATEGY: framework
+      # Stage 4: the queue and the object store, by compose service name.
+      SPRING_RABBITMQ_HOST: rabbitmq
+      APP_S3_ENDPOINT: http://seaweedfs:8333
+      # Presigned URLs are consumed by the client, so they must name an address the
+      # client can reach — not the internal service name.
+      APP_S3_PUBLIC_ENDPOINT: http://localhost:8333
     depends_on:
       postgres: { condition: service_healthy }
       redis: { condition: service_started }
+      rabbitmq: { condition: service_healthy }
+      seaweedfs: { condition: service_healthy }
     # Deliberately no 'ports': app instances are private. Reaching them from the host
     # would both bypass the balancer and let a client spoof X-Forwarded-For.
     #
     # Declared here rather than passed as --scale app=3: the CLI flag is not persisted,
     # so any later 'docker compose up' would silently scale back down to one instance.
+    deploy:
+      replicas: 3
+
+  # Consumes media.compress. No ports: it is not an HTTP service, which is exactly
+  # the point — it scales on queue depth, independently of the web tier.
+  worker:
+    build:
+      context: .
+      dockerfile: worker/Dockerfile
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/quicklink
+      SPRING_DATASOURCE_USERNAME: quicklink
+      SPRING_DATASOURCE_PASSWORD: quicklink
+      SPRING_RABBITMQ_HOST: rabbitmq
+      APP_S3_ENDPOINT: http://seaweedfs:8333
+    depends_on:
+      postgres: { condition: service_healthy }
+      rabbitmq: { condition: service_healthy }
+      seaweedfs: { condition: service_healthy }
+    # Competing consumers on one queue: RabbitMQ hands each message to exactly one
+    # of them, so throughput scales with replica count. Declared here rather than
+    # via --scale, which is not persisted.
     deploy:
       replicas: 3
 
@@ -62,4 +140,6 @@ services:
       app: { condition: service_started }
     ports: ["8080:8080"]
 
-volumes: { pgdata: {} }
+volumes:
+  pgdata: {}
+  seaweeddata: {}

@@ -1,0 +1,39 @@
+spring:
+  application:
+    name: worker
+  # No JPA here: the worker uses JdbcTemplate for a few narrow UPDATEs.
+  datasource:
+    url: jdbc:postgresql://localhost:5434/quicklink
+    username: quicklink
+    password: quicklink
+  rabbitmq:
+    host: localhost
+    port: 5672
+    listener:
+      simple:
+        # Transient failures (S3 blip, DB hiccup) get a few backed-off attempts.
+        # MEASURED on Spring Framework 7's new core.retry: max-attempts counts RETRIES,
+        # so 3 here means 4 total attempts, with waits of 1s, 2s, 4s. (spring-retry in
+        # Boot 3 counted total attempts instead — do not assume the old semantics.)
+        retry:
+          enabled: true
+          max-attempts: 3
+          initial-interval: 1s
+          multiplier: 2
+          max-interval: 10s
+        # Critical: once retries are exhausted the message must be rejected WITHOUT
+        # requeue, so it is dead-lettered instead of looping forever.
+        default-requeue-rejected: false
+
+app:
+  s3:
+    endpoint: http://localhost:8333
+    access-key: quicklink
+    secret-key: quicklink-secret
+    buckets:
+      originals: originals
+      processed: processed
+
+logging:
+  level:
+    com.quicklink.worker: INFO

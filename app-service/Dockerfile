@@ -14,6 +14,7 @@ COPY app-service/pom.xml app-service/
 # The parent pom lists edge-lb as a module, so Maven needs its pom present to build
 # the reactor at all — even though -pl app-service never compiles it.
 COPY edge-lb/pom.xml edge-lb/
+COPY worker/pom.xml worker/
 RUN ./mvnw -B -pl app-service -am dependency:go-offline
 
 # Source last: editing a .java file invalidates only from here down.
