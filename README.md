@@ -169,6 +169,24 @@ The two services share a **JSON contract, not a Java class**. The producer stamp
 `__TypeId__` header naming a class the worker does not have; the worker sets
 `TypePrecedence.INFERRED` so its own listener signature wins.
 
+**The broker is swappable.** `MediaJobQueue` has a single method and two implementations,
+chosen by `app.queue`: RabbitMQ (default) or Amazon SQS. The unused side's beans are never
+created, so the SQS deployment needs no broker running anywhere and the Rabbit deployment
+builds no AWS client. Implementing it twice is what showed me how differently the two think:
+
+| | RabbitMQ | SQS |
+|---|---|---|
+| Who creates the queue | the application, at startup | Terraform; the app never declares topology |
+| Delivery | the broker pushes to a listener | the consumer long-polls, 20 s at a time |
+| Ack | the channel acks when the listener returns | `DeleteMessage`. **Not deleting is the retry** |
+| Retries | `listener.simple.retry`, configured in the app | the queue's visibility timeout; the app has no say |
+| Dead-lettering | a DLX, a binding, and `default-requeue-rejected: false` | a redrive policy with `maxReceiveCount` |
+| Deadline on the handler | none | the visibility timeout: slower work gets a second consumer |
+
+That last row is why the worker's idempotency check matters more on SQS than on Rabbit, and
+the SQS test pins all of it against ElasticMQ — including a job that fails until the redrive
+policy moves it to the dead-letter queue, with no broker container in the test at all.
+
 ---
 
 ## Design decisions & tradeoffs
@@ -225,6 +243,52 @@ cache.
 
 ---
 
+## Deploying
+
+The deployed topology is **one small VM running Docker Compose, with object storage and the
+queue rented from AWS**:
+
+```
+  browser ──► VM (Oracle Cloud always-free, 4 OCPU / 24 GB ARM)
+              └─ compose: edge-lb, 3 app, 3 worker, Postgres, Redis
+                                │
+                                ▼
+                 AWS: S3 (originals + processed) · SQS (+ DLQ)
+```
+
+The split is on purpose, and it is the same judgement in both directions.
+
+**Rented, because the managed version is strictly better.** Object storage and a queue are
+pure commodity: durability across availability zones and an API that does not care how much
+you put in it. Nothing about running them myself would be interesting, and SeaweedFS on one
+VM has exactly one disk. S3 and SQS are also the two cheapest services AWS sells for this
+shape of workload — SQS gives a million requests a month in the permanent free tier.
+
+**Self-hosted, because the managed version would hide the project.** Postgres on RDS, Redis
+on ElastiCache and three app instances behind an ALB would cost roughly $60/month and delete
+the parts worth showing: the load balancer I wrote, the Redis rate limiter, the leader
+election. Managed services are the right default at work and the wrong one in a project whose
+point is the mechanism.
+
+No code changes between the two worlds — just configuration:
+
+| | Local | Deployed |
+|---|---|---|
+| Object store | SeaweedFS, `app.s3.endpoint` set, path-style addressing | real S3, endpoint blank, virtual-host addressing |
+| Queue | RabbitMQ, `app.queue=rabbit` | SQS, `app.queue=sqs` |
+| Credentials | static keys in config | static keys from Terraform, or no keys at all on AWS compute, where the SDK's default chain finds the instance role |
+
+`S3ConfigTest` pins the AWS branch **offline**, by presigning a URL and asserting the host
+and signing scope — presigning is local signing, so the real-AWS code path is testable with
+no account.
+
+[`infra/`](infra/) holds the Terraform: two buckets with lifecycle rules, the queue and its
+redrive policy, an IAM user scoped to exactly those four ARNs, and a monthly budget alarm
+with forecast and actual alerts, because the upload endpoint is public and unauthenticated.
+[`DEPLOY.md`](DEPLOY.md) is the step-by-step runbook.
+
+---
+
 ## Project layout
 
 ```
@@ -245,13 +309,15 @@ quicklink/
 ├── worker/                  RabbitMQ consumer, image compression, scaled ×3
 │                            JdbcTemplate rather than JPA — a few narrow UPDATEs
 │
-└── edge-lb/                 L7 load balancer, plain Java, zero dependencies
+├── edge-lb/                 L7 load balancer, plain Java, zero dependencies
+│
+└── infra/                   Terraform: S3 buckets, SQS + DLQ, scoped IAM, budget alarm
 ```
 
 ## Tests
 
 ```bash
-./mvnw test        # 63 tests; needs Docker, no hand-started dependencies
+./mvnw test        # 74 tests; needs Docker, no hand-started dependencies
 ```
 
 Pure logic (Base62, backend selection, image compression) runs as plain JUnit with no Spring

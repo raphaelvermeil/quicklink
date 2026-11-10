@@ -1,6 +1,5 @@
 package com.quicklink.app.media;
 
-import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.event.TransactionPhase;
 import org.springframework.transaction.event.TransactionalEventListener;
@@ -17,15 +16,14 @@ import org.springframework.transaction.event.TransactionalEventListener;
 @Component
 class MediaJobPublisher {
 
-    private final RabbitTemplate rabbitTemplate;
+    private final MediaJobQueue queue;
 
-    MediaJobPublisher(RabbitTemplate rabbitTemplate) {
-        this.rabbitTemplate = rabbitTemplate;
+    MediaJobPublisher(MediaJobQueue queue) {
+        this.queue = queue;
     }
 
     @TransactionalEventListener(phase = TransactionPhase.AFTER_COMMIT)
     void onUploaded(MediaUploadedEvent event) {
-        rabbitTemplate.convertAndSend(RabbitConfig.COMPRESS_QUEUE,
-                new MediaCompressJob(event.assetId(), event.originalKey()));
+        queue.publish(new MediaCompressJob(event.assetId(), event.originalKey()));
     }
 }

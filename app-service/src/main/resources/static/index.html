@@ -17,13 +17,12 @@
     font:13.5px/1.5 ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
     display:flex; flex-direction:column; overflow:hidden;
   }
-  code,.mono { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; }
+  .mono { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; }
 
-  /* ---------- header / form ---------- */
-  header { border-bottom:1px solid var(--line); padding:12px 18px; display:flex; gap:18px; align-items:center; flex-wrap:wrap; }
+  header { border-bottom:1px solid var(--line); padding:12px 18px; display:flex; gap:16px; align-items:center; flex-wrap:wrap; }
   header h1 { margin:0; font-size:15px; white-space:nowrap; }
   header h1 small { color:var(--faint); font-weight:400; margin-left:8px; }
-  form { display:flex; gap:8px; align-items:center; flex:1 1 420px; min-width:280px; }
+  form { display:flex; gap:8px; align-items:center; flex:1 1 440px; min-width:280px; }
   input[type=url] {
     flex:1; min-width:0; font:inherit; padding:8px 11px; border-radius:7px;
     border:1px solid var(--line); background:#0a0e16; color:var(--ink);
@@ -36,10 +35,23 @@
   button:hover:not(:disabled) { border-color:var(--accent); background:#16203a; }
   button:disabled { opacity:.45; cursor:not-allowed; }
   button.primary { border-color:#2d5c99; background:#16304f; }
-  .result { font-size:12.5px; color:var(--dim); display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
-  .result a { color:var(--accent); }
 
-  /* ---------- middle ---------- */
+  /* The short URL is the whole point of the tool, so it gets its own band. */
+  #out {
+    display:none; padding:11px 18px; border-bottom:1px solid var(--line);
+    background:linear-gradient(90deg,#132033,#0e131f);
+    align-items:center; gap:13px; flex-wrap:wrap;
+  }
+  #out.show { display:flex; }
+  #out .status { font-size:11px; letter-spacing:1px; text-transform:uppercase; color:var(--faint); }
+  #out .code { font-family:ui-monospace,Menlo,monospace; font-size:19px; font-weight:600;
+               color:var(--accent); user-select:all; }
+  #out .arrow { color:var(--faint); }
+  #out .target { font-family:ui-monospace,Menlo,monospace; font-size:12px; color:var(--dim);
+                 max-width:40ch; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  #out a { color:var(--accent); font-size:12.5px; }
+  #out .msg { font-size:12.5px; }
+
   main { flex:1 1 auto; display:flex; min-height:0; border-bottom:1px solid var(--line); }
   #stage { flex:1 1 auto; min-width:0; }
   svg { width:100%; height:100%; display:block; }
@@ -53,8 +65,7 @@
   .ok{color:var(--ok)} .warn{color:var(--warn)} .bad{color:var(--bad)}
   .media{color:var(--media)} .dim{color:var(--dim)}
 
-  /* ---------- live tables ---------- */
-  #live { flex:0 0 36%; display:flex; min-height:0; }
+  #live { flex:0 0 34%; display:flex; min-height:0; }
   .pane { flex:1 1 0; min-width:0; border-right:1px solid var(--line); display:flex; flex-direction:column; }
   .pane:last-child { border-right:0; }
   .pane h2 {
@@ -68,7 +79,7 @@
        font-weight:500; padding:5px 9px; border-bottom:1px solid var(--line); white-space:nowrap; }
   td { padding:4px 9px; border-bottom:1px solid #151c29; white-space:nowrap;
        overflow:hidden; text-overflow:ellipsis; max-width:230px; }
-  tr.flash td { animation:flash 1.6s ease-out; }
+  tr.flash td { animation:flash 1.8s ease-out; }
   @keyframes flash { from { background:#1d3a5c; } to { background:transparent; } }
   .pill { padding:1px 6px; border-radius:20px; font-size:10px; border:1px solid var(--line); }
   .pill.PENDING{color:var(--warn);border-color:#4a3a1c}
@@ -77,7 +88,6 @@
   .pill.FAILED{color:var(--bad);border-color:#4d2222}
   .empty { padding:10px 12px; color:var(--faint); font-size:11.5px; }
 
-  /* ---------- svg ---------- */
   .box { fill:var(--panel); stroke:var(--line); stroke-width:1.4; }
   .box.hot { stroke:var(--accent); filter:url(#glow); }
   .box.hotm { stroke:var(--media); filter:url(#glow); }
@@ -87,7 +97,7 @@
   .edge { stroke:#1b2335; stroke-width:1.4; fill:none; }
   @media (max-width:900px) {
     main { flex-direction:column; } #trace { flex:0 0 120px; border-left:0; border-top:1px solid var(--line); }
-    #live { flex:0 0 46%; } .pane:nth-child(3){ display:none; }
+    #live { flex:0 0 44%; } .pane:nth-child(3){ display:none; }
   }
 </style>
 </head>
@@ -96,15 +106,25 @@
 <header>
   <h1>Quicklink <small>live system</small></h1>
   <form id="f">
-    <input id="url" type="url" placeholder="https://example.com/a/very/long/url/to/shorten" required
+    <input id="url" type="url" required
+           placeholder="https://example.com/a/very/long/url/to/shorten"
            value="https://example.com/docs/some/deep/page?ref=readme">
     <button class="primary" type="submit">Shorten</button>
-    <button type="button" id="b-follow">Follow it</button>
     <button type="button" id="b-upload">Upload image</button>
     <button type="button" id="b-burst">Burst 12</button>
+    <button type="button" id="b-flush" title="run the scheduled flush immediately">Flush now</button>
   </form>
-  <div class="result" id="result"></div>
 </header>
+
+<div id="out">
+  <span class="status" id="out-status"></span>
+  <span class="code" id="out-code"></span>
+  <button type="button" id="out-copy">copy</button>
+  <button type="button" id="out-test" class="primary">Test it &#9656;</button>
+  <a id="out-open" target="_blank" rel="noopener">open in a new tab &#8599;</a>
+  <span class="arrow">&rarr;</span><span class="target" id="out-target"></span>
+  <span class="msg" id="out-msg"></span>
+</div>
 
 <main>
   <div id="stage">
@@ -123,7 +143,7 @@
 
 <section id="live">
   <div class="pane">
-    <h2><span>Postgres · link</span><span id="c-links" class="dim"></span></h2>
+    <h2><span>Postgres &middot; link</span><span id="c-links" class="dim"></span></h2>
     <div class="scroll" id="t-links"></div>
   </div>
   <div class="pane">
@@ -137,7 +157,7 @@
 </section>
 
 <script>
-// ======================================================= diagram layout
+// ======================================================= diagram
 const N = {
   you:   { x: 22, y:186, w: 92, h:48, label:"you",       sub:"this browser" },
   lb:    { x:158, y:186, w:112, h:48, label:"edge-lb",   sub:":8080" },
@@ -146,10 +166,14 @@ const N = {
   app3:  { x:318, y:276, w:112, h:44, label:"app-3",     sub:"" },
   redis: { x:492, y: 34, w:126, h:50, label:"Redis",     sub:"cache·bucket·clicks" },
   pg:    { x:492, y:186, w:126, h:50, label:"Postgres",  sub:"link·stats·assets" },
-  s3:    { x:492, y:340, w:126, h:50, label:"SeaweedFS", sub:"originals/processed" },
-  mq:    { x:688, y:262, w:116, h:46, label:"RabbitMQ",  sub:"media.compress" },
-  work:  { x:860, y:262, w:116, h:46, label:"worker ×3", sub:"consumers" },
-  dlq:   { x:688, y:344, w:116, h:40, label:"…dlq",      sub:"poison" }
+  // These three are named by /api/inspect/mode once it answers, because what they
+  // actually are depends on how this instance is deployed: SeaweedFS and RabbitMQ
+  // locally, S3 and SQS on AWS. The values here are only what shows for the first
+  // few hundred milliseconds.
+  s3:    { x:492, y:340, w:126, h:50, label:"object store", sub:"originals/processed" },
+  mq:    { x:688, y:262, w:116, h:46, label:"queue",        sub:"media.compress" },
+  work:  { x:860, y:262, w:116, h:46, label:"worker",       sub:"compression" },
+  dlq:   { x:688, y:344, w:116, h:40, label:"…dlq",  sub:"poison" }
 };
 const E = [["you","lb"],["lb","app1"],["lb","app2"],["lb","app3"],
   ["app1","redis"],["app2","redis"],["app3","redis"],
@@ -164,7 +188,7 @@ const el=(t,a={})=>{const n=document.createElementNS(NS,t);for(const k in a)n.se
 const cx=n=>n.x+n.w/2, cy=n=>n.y+n.h/2;
 const curve=(a,b)=>{const mx=(cx(a)+cx(b))/2;return `M ${cx(a)} ${cy(a)} C ${mx} ${cy(a)}, ${mx} ${cy(b)}, ${cx(b)} ${cy(b)}`;};
 
-const paths={}, boxes={}, badges={}, subs={};
+const paths={}, boxes={}, badges={}, subs={}, labels={};
 for (const [f,t] of E) {
   const p=el("path",{class:"edge",d:curve(N[f],N[t])});
   document.getElementById("edges").appendChild(p); paths[f+">"+t]=p;
@@ -177,15 +201,27 @@ for (const k in N) {
   const bd=el("text",{class:"nbadge",x:n.x+11,y:n.y+n.h-6,fill:"var(--ok)"});
   g.append(r,lb,sb,bd);
   document.getElementById("nodes").appendChild(g);
-  boxes[k]=r; badges[k]=bd; subs[k]=sb;
+  boxes[k]=r; badges[k]=bd; subs[k]=sb; labels[k]=lb;
 }
+// What this instance is actually talking to. Asked once, on load.
+let mode = { queue:"rabbit", store:"seaweedfs" };
+fetch("/api/inspect/mode").then(r=>r.json()).then(m=>{
+  mode = m;
+  const sqs = m.queue === "sqs";
+  labels.mq.textContent   = sqs ? "Amazon SQS" : "RabbitMQ";
+  subs.mq.textContent     = sqs ? "media-compress" : "media.compress";
+  // RabbitMQ pushes to registered consumers; with SQS the workers poll for work,
+  // and nothing is registered anywhere. Different word, because it is a different
+  // mechanism — not a synonym.
+  subs.work.textContent   = sqs ? "pollers" : "consumers";
+  labels.s3.textContent   = m.store === "s3" ? "Amazon S3" : "SeaweedFS";
+}).catch(()=>{});
 
 const setBadge=(k,txt,cls)=>{badges[k].textContent=txt||"";
   badges[k].setAttribute("fill",cls==="warn"?"var(--warn)":cls==="bad"?"var(--bad)":cls==="media"?"var(--media)":"var(--ok)");};
 const pulse=(k,m)=>{boxes[k].classList.add(m?"hotm":"hot");setTimeout(()=>boxes[k].classList.remove("hot","hotm"),620);};
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 
-/** Moves a dot along the drawn edge between two nodes, then lights the target. */
 function travel(from,to,colour,ms=460){
   return new Promise(res=>{
     const fwd=paths[from+">"+to], back=paths[to+">"+from];
@@ -207,7 +243,7 @@ function travel(from,to,colour,ms=460){
   });
 }
 
-// ======================================================= trace log
+// ======================================================= trace
 const traceEl=document.getElementById("trace");
 let step=0;
 function trace(msg,cls=""){
@@ -221,15 +257,21 @@ function newRun(title){ traceEl.innerHTML=""; step=0; trace(title,"dim"); }
 // ======================================================= live tables
 const esc=s=>String(s??"").replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
 const short=(s,n=34)=>{s=String(s??"");return s.length>n?s.slice(0,n)+"…":s;};
-let knownLinkIds=new Set(), knownRedisKeys=new Set(), firstPaint=true;
+let knownLinkIds=new Map(), knownRedisKeys=new Map(), firstPaint=true;
 
-function table(cols, rows, flashKey, known) {
+/**
+ * `known` maps a row id to a signature of its mutable values, so a row flashes when it
+ * first appears AND when one of its numbers changes — without that, a click landing on
+ * an existing link would update completely silently.
+ */
+function table(cols, rows, flashKey, known, signature) {
   if(!rows.length) return `<div class="empty">empty</div>`;
   const head=cols.map(c=>`<th>${c.h}</th>`).join("");
   const body=rows.map(r=>{
     const id=flashKey?r[flashKey]:null;
-    const isNew=!firstPaint && id!=null && known && !known.has(id);
-    if(id!=null && known) known.add(id);
+    const sig=signature?signature(r):"";
+    let isNew=false;
+    if(id!=null && known){ isNew = !firstPaint && known.get(id)!==sig; known.set(id,sig); }
     return `<tr class="${isNew?"flash":""}">${cols.map(c=>`<td title="${esc(c.v(r))}">${c.r?c.r(r):esc(short(c.v(r)))}</td>`).join("")}</tr>`;
   }).join("");
   return `<table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`;
@@ -248,21 +290,27 @@ async function refreshLive(){
       {h:"short_code", v:r=>r.short_code, r:r=>`<b>${esc(r.short_code)}</b>`},
       {h:"type",       v:r=>r.target_type},
       {h:"target",     v:r=>r.target_url ?? ("asset #"+r.media_asset_id)},
-      {h:"clicks",     v:r=>r.persisted_clicks}
-    ], links, "id", knownLinkIds);
-    document.getElementById("c-links").textContent = links.length + " newest";
+      // Both halves, because that is the point of write-behind: a click lands in Redis
+      // immediately and only reaches Postgres when the flusher runs.
+      {h:"clicks (pg)", v:r=>r.persisted_clicks},
+      {h:"pending (redis)", v:r=>r.pending_clicks,
+       r:r=>r.pending_clicks>0 ? '<span class="warn">+'+r.pending_clicks+'</span>' : '-'}
+    ], links, "id", knownLinkIds, r=>r.persisted_clicks+"/"+r.pending_clicks);
+    document.getElementById("c-links").textContent = links.length+" newest";
 
     const flat=[];
-    for (const [group, rows] of Object.entries(redis))
-      rows.forEach(r=>flat.push({group, ...r}));
+    for (const [group, rows] of Object.entries(redis)) rows.forEach(r=>flat.push({group, ...r}));
     document.getElementById("t-redis").innerHTML = table([
       {h:"key",   v:r=>r.key, r:r=>`<b>${esc(short(r.key,28))}</b>`},
       {h:"value", v:r=>r.value},
       {h:"ttl",   v:r=>r.ttl===-1?"∞":(r.ttl==null?"":r.ttl+"s")}
-    ], flat, "key", knownRedisKeys);
-    document.getElementById("c-redis").textContent = flat.length + " keys";
+    ], flat, "key", knownRedisKeys, r=>String(r.value)+":"+String(r.ttl));
+    document.getElementById("c-redis").textContent = flat.length+" keys";
 
-    const qRows = queues.map(q=>({a:q.name, b:q.messages+" msg", c:q.consumers+" consumers"}))
+    // RabbitMQ reports a consumer count; SQS has no such concept and reports in-flight
+    // instead, so whichever the backend sent is what gets shown.
+    const qNote = q => q.error ?? q.detail ?? (q.consumers!=null ? q.consumers+" consumers" : "—");
+    const qRows = queues.map(q=>({a:q.name, b:(q.messages??"?")+" msg", c:qNote(q)}))
       .concat(media.map(m=>({a:"asset #"+m.id, b:`<span class="pill ${m.status}">${m.status}</span>`,
         c:m.processed_bytes?`${m.original_bytes}→${m.processed_bytes}`:(m.error_message?short(m.error_message,22):"—")})));
     document.getElementById("t-queue").innerHTML = table([
@@ -270,10 +318,50 @@ async function refreshLive(){
       {h:"",     v:r=>r.b, r:r=>r.b},
       {h:"",     v:r=>r.c, r:r=>r.c}
     ], qRows, null, null);
-    document.getElementById("c-q").textContent = (queues[0]?.consumers ?? "?") + " consumers";
-
+    document.getElementById("c-q").textContent = queues[0] ? qNote(queues[0]) : "—";
+    // Only RabbitMQ can tell us how many workers are attached; SQS has no idea who is
+    // polling it, so the box stays unnumbered rather than guessing.
+    const attached = queues[0]?.consumers;
+    labels.work.textContent = attached != null ? "worker ×"+attached : "worker";
     firstPaint=false;
-  }catch(e){ /* a refresh failing must never break an animation */ }
+  }catch(e){ /* a failed refresh must never break an animation */ }
+}
+
+// ======================================================= result band
+/**
+ * Renders the short URL as the headline output. A null `code` means there is nothing
+ * to test (a 429 or a validation failure), so the testing controls are hidden.
+ */
+async function showResult({ status, code, msg, cls }) {
+  const out=document.getElementById("out");
+  out.classList.add("show");
+  document.getElementById("out-status").textContent = status||"";
+  const m=document.getElementById("out-msg");
+  m.innerHTML = msg||""; m.className = "msg "+(cls||"");
+
+  const hasCode = Boolean(code);
+  for (const id of ["out-code","out-copy","out-test","out-open","out-target"])
+    document.getElementById(id).style.display = hasCode ? "" : "none";
+  out.querySelector(".arrow").style.display = hasCode ? "" : "none";
+  if (!hasCode) return;
+
+  const full = location.origin + "/" + code;
+  document.getElementById("out-code").textContent = full;
+  document.getElementById("out-open").href = "/" + code;
+  document.getElementById("out-copy").onclick = () => {
+    navigator.clipboard.writeText(full);
+    const b=document.getElementById("out-copy");
+    b.textContent="copied"; setTimeout(()=>b.textContent="copy",1200);
+  };
+
+  // What it actually points at, read back from the server rather than echoed from the
+  // input box: this proves the system can resolve the code. The preview endpoint
+  // records no click, so looking does not change the numbers you are looking at.
+  try{
+    const p = await fetch("/api/links/"+code).then(r=>r.ok?r.json():null);
+    document.getElementById("out-target").textContent = !p ? ""
+      : (p.targetType==="MEDIA" ? "uploaded image (asset #"+p.mediaAssetId+")" : p.targetUrl);
+  }catch(e){ /* the headline URL still stands on its own */ }
 }
 
 // ======================================================= helpers
@@ -287,18 +375,15 @@ async function exclusive(fn){
   allButtons().forEach(b=>b.disabled=false);
 }
 const served=res=>res.headers.get("X-Instance-Id")||"?";
-/** Pins each real container id to a diagram slot, first-seen order. */
 const slots=new Map();
 function slotFor(id){
   if(!slots.has(id)){
     const taken=new Set(slots.values());
     const free=["app1","app2","app3"].find(k=>!taken.has(k))||"app2";
-    slots.set(id,free);
-    subs[free].textContent=id.slice(0,10);
+    slots.set(id,free); subs[free].textContent=id.slice(0,10);
   }
   return slots.get(id);
 }
-function showResult(html){ document.getElementById("result").innerHTML=html; }
 
 // ======================================================= shorten
 async function shorten(){
@@ -310,8 +395,7 @@ async function shorten(){
   trace("edge-lb picks a healthy backend (round-robin)","dim");
 
   const res=await fetch("/api/links",{method:"POST",
-    headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({longUrl})});
+    headers:{"Content-Type":"application/json"}, body:JSON.stringify({longUrl})});
 
   const who=served(res), slot=slotFor(who);
   setBadge("lb","→ "+who.slice(0,6));
@@ -322,21 +406,23 @@ async function shorten(){
   if(left!==null){
     await travel(slot,"redis",BLUE);
     setBadge("redis","tokens "+left,left==="0"?"warn":"");
-    trace(`token taken from the Redis bucket · <b>${left}</b> left`,"dim");
+    trace(`token taken from the Redis bucket · <b>${esc(left)}</b> left`,"dim");
   }
 
   if(res.status===429){
     setBadge("lb","429","bad"); trace("429 Too Many Requests","bad");
-    showResult(`<span class="bad">rate limited — wait ${esc(res.headers.get("Retry-After"))}s</span>`);
+    await showResult({ status:"429 Too Many Requests", code:null,
+      msg:`the shared bucket is empty — retry in ${esc(res.headers.get("Retry-After"))}s`, cls:"bad" });
     return;
   }
   if(res.status===400){
-    setBadge("lb","400","bad"); trace("400 — the URL failed @Valid/@URL","bad");
-    showResult(`<span class="bad">400 — not a valid URL</span>`); return;
+    setBadge("lb","400","bad"); trace("400 — rejected by @Valid","bad");
+    await showResult({ status:"400 Bad Request", code:null,
+      msg:"that is not a valid URL — rejected before the controller ran", cls:"bad" });
+    return;
   }
 
-  const body=await res.json();
-  newest=body.shortCode;
+  const body=await res.json(); newest=body.shortCode;
   await travel(slot,"pg",BLUE);
   setBadge("pg","INSERT link");
   trace(`row written · short_code <b>${esc(body.shortCode)}</b>`,"ok");
@@ -345,25 +431,24 @@ async function shorten(){
   await travel(slot,"lb",BLUE,330);
   await travel("lb","you",BLUE,330);
   trace("201 Created","ok");
-  showResult(`<span class="ok">201</span> <a href="/${esc(body.shortCode)}" target="_blank" class="mono">${esc(body.shortUrl)}</a>
-              <button type="button" id="b-copy">copy</button>`);
-  document.getElementById("b-copy").onclick=()=>navigator.clipboard.writeText(body.shortUrl);
+  await showResult({ status:"201 Created · your short link", code:body.shortCode,
+    msg:"press <b>Test it</b> to follow it through the cache", cls:"dim" });
 }
 
-// ======================================================= follow
+// ======================================================= test / follow
 async function follow(){
   if(!newest){ trace("shorten something first","warn"); return; }
   newRun(`GET /${esc(newest)}`);
 
-  // Observe the cache BEFORE the request, so hit-vs-miss is measured, not asserted.
+  // Read the cache BEFORE the request, so hit-vs-miss is measured, not asserted.
   const key="link:code:"+newest;
   const before=await fetch("/api/inspect/redis").then(r=>r.json());
   const cachedBefore=before.cache.some(k=>k.key===key);
-  trace(cachedBefore?"cache already holds this code → expect a HIT":"cache has no entry → expect a MISS","dim");
+  trace(cachedBefore?"cache holds this code → expect a HIT":"no cache entry → expect a MISS","dim");
 
   const statsBefore=await fetch(`/api/links/${newest}/stats`).then(r=>r.json());
   await travel("you","lb",BLUE);
-  await fetch("/"+newest,{redirect:"manual"});   // opaque by design; proof comes below
+  await fetch("/"+newest,{redirect:"manual"});   // opaque by design; proof is below
 
   const res=await fetch(`/api/links/${newest}/stats`);
   const statsAfter=await res.json();
@@ -375,10 +460,10 @@ async function follow(){
   const cachedAfter=after.cache.find(k=>k.key===key);
   if(!cachedBefore && cachedAfter){
     await travel(slot,"pg",BLUE);
-    trace("MISS → read Postgres, then cached","warn");
+    trace("MISS → read Postgres","warn");
     await travel("pg",slot,BLUE,330);
     setBadge("redis",`cached ${cachedAfter.ttl}s`);
-    trace(`cache populated with TTL <b>${cachedAfter.ttl}s</b>`,"ok");
+    trace(`cache populated, TTL <b>${cachedAfter.ttl}s</b>`,"ok");
   } else if(cachedAfter){
     setBadge("redis","cache HIT");
     trace("HIT → Postgres never touched","ok");
@@ -390,7 +475,10 @@ async function follow(){
     setBadge("pg","write-behind");
     trace("flushed to Postgres every 60s, not per click","dim");
   }
-  showResult(`<span class="ok">302</span> <span class="dim">clicks now ${statsAfter.clicks}</span>`);
+  trace("the clicks(pg) column will NOT move yet - that is write-behind","warn");
+  await showResult({ status:"302 Found · it works", code:newest,
+    msg:`${cachedBefore?"served from the Redis cache":"read from Postgres, now cached"} · <b>${statsAfter.clicks}</b> click(s) - counted in Redis; press <b>Flush now</b> to push it into Postgres`,
+    cls:"ok" });
 }
 
 // ======================================================= upload
@@ -410,7 +498,11 @@ async function upload(){
 
   await travel("you","lb",PURPLE);
   const res=await fetch("/api/media",{method:"POST",body:form});
-  if(res.status===429){ setBadge("lb","429","bad"); trace("429","bad"); return; }
+  if(res.status===429){
+    setBadge("lb","429","bad"); trace("429","bad");
+    await showResult({ status:"429 Too Many Requests", code:null, msg:"rate limited", cls:"bad" });
+    return;
+  }
 
   const who=served(res), slot=slotFor(who);
   setBadge("lb","→ "+who.slice(0,6));
@@ -422,7 +514,8 @@ async function upload(){
   await travel(slot,"pg",PURPLE); setBadge("pg","PENDING","media");
   await travel(slot,"mq",PURPLE); setBadge("mq","queued","media");
   trace(`202 Accepted · <b>${esc(body.shortCode)}</b> — request ends here`,"media");
-  showResult(`<span class="media">202 PENDING</span> <span class="mono dim">${esc(body.shortCode)}</span>`);
+  await showResult({ status:"202 Accepted · compressing in the background", code:body.shortCode,
+    msg:"the request is already finished — a worker has the job", cls:"media" });
   await refreshLive();
 
   trace("— nothing is on the request thread now —","dim");
@@ -441,11 +534,13 @@ async function upload(){
     await travel("work","pg",PURPLE); setBadge("pg","READY"); setBadge("work","idle");
     const pct=Math.round(100*s.processedBytes/s.originalBytes);
     trace(`READY · ${s.originalBytes.toLocaleString()} → <b>${s.processedBytes.toLocaleString()}</b> bytes (${pct}%)`,"ok");
-    showResult(`<span class="ok">READY</span> <a href="/${esc(newest)}" target="_blank">open the image</a>
-                <span class="dim">302 → presigned URL</span>`);
+    await showResult({ status:"READY · "+pct+"% of the original", code:newest,
+      msg:"Test it, or open it to be redirected to a presigned URL", cls:"ok" });
   } else if(s&&s.status==="FAILED"){
     await travel("mq","dlq",RED); setBadge("dlq","1","bad"); setBadge("pg","FAILED","bad");
     trace(`FAILED · ${esc(s.errorMessage)} — dead-lettered`,"bad");
+    await showResult({ status:"410 Gone · processing failed", code:null,
+      msg:esc(s.errorMessage)+" — dead-lettered, not retried forever", cls:"bad" });
   } else { trace("still processing — is the worker running?","warn"); }
 }
 
@@ -469,16 +564,43 @@ async function burst(){
     }
   }
   trace(`${ok} created, ${limited} rejected — one bucket, three instances`,"warn");
-  showResult(`<span class="warn">${ok} created · ${limited} rate limited</span>`);
+  await showResult({ status:"burst finished", code:null,
+    msg:`<b>${ok}</b> created, <b>${limited}</b> rate limited — one bucket, three instances`, cls:"warn" });
+}
+
+// ======================================================= flush now
+/** Triggers the scheduled job by hand so the Redis -> Postgres hand-off is watchable. */
+async function flushNow(){
+  newRun("POST /api/inspect/flush - running the scheduled job now");
+  const before=await fetch("/api/inspect/links?limit=8").then(r=>r.json());
+  const pendingBefore=before.reduce((n,r)=>n+r.pending_clicks,0);
+  trace(pendingBefore+" click(s) waiting in Redis","dim");
+
+  await travel("you","lb",BLUE);
+  await fetch("/api/inspect/flush",{method:"POST"});
+  await travel("lb","app2",BLUE,300);
+  await travel("app2","redis",BLUE);
+  trace("GETDEL drains each counter - atomic, so concurrent clicks are not lost","dim");
+  await travel("redis","pg",BLUE,700);
+  setBadge("pg","UPDATE link_stats"); setBadge("redis","drained");
+
+  const after=await fetch("/api/inspect/links?limit=8").then(r=>r.json());
+  const persistedAfter=after.reduce((n,r)=>n+r.persisted_clicks,0);
+  trace("clicks(pg) now totals <b>"+persistedAfter+"</b>; pending is back to 0","ok");
+  await showResult({ status:"flushed", code:newest,
+    msg:"<b>"+pendingBefore+"</b> pending click(s) moved from Redis into Postgres - watch the columns swap",
+    cls:"ok" });
 }
 
 // ======================================================= wiring
 document.getElementById("f").addEventListener("submit", e=>{ e.preventDefault(); exclusive(shorten); });
-document.getElementById("b-follow").onclick=()=>exclusive(follow);
+document.getElementById("out-test").onclick=()=>exclusive(follow);
 document.getElementById("b-upload").onclick=()=>exclusive(upload);
 document.getElementById("b-burst").onclick=()=>exclusive(burst);
+document.getElementById("b-flush").onclick=()=>exclusive(flushNow);
 
 trace("paste a URL and press Shorten","dim");
+document.getElementById("url").focus();
 refreshLive();
 setInterval(refreshLive, 2500);
 </script>

@@ -26,8 +26,25 @@ spring:
         default-requeue-rejected: false
 
 app:
+  # Which broker carries media jobs: rabbit (default) or sqs. Nothing else in the
+  # application changes — MediaJobQueue has one implementation per broker, and the
+  # topology beans for the unused one are never created. Override per deployment with
+  # the APP_QUEUE environment variable.
+  queue: rabbit
+  # Only read when queue=sqs. Terraform in infra/ creates the queues and outputs these
+  # URLs; unlike Rabbit, the application never declares its own topology. Leave
+  # endpoint blank for real SQS, or point it at ElasticMQ to run locally.
+  sqs:
+    queue-url: ${APP_SQS_QUEUE_URL:}
+    endpoint: ${APP_SQS_ENDPOINT:}
+    region: ${APP_SQS_REGION:us-east-1}
+    access-key: ${APP_SQS_ACCESS_KEY:}
+    secret-key: ${APP_SQS_SECRET_KEY:}
+    dlq-url: ${APP_SQS_DLQ_URL:}
   s3:
+    # Set for a local store; remove it to use real AWS S3. See app-service's config.
     endpoint: http://localhost:8333
+    region: us-east-1
     access-key: quicklink
     secret-key: quicklink-secret
     buckets:

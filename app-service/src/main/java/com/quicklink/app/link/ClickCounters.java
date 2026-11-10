@@ -1,11 +1,11 @@
 package com.quicklink.app.link;
 
-final class ClickCounters {
+public final class ClickCounters {
 
-    static final String DIRTY_SET = "stats:dirty";
-    private static final String COUNTER_PREFIX = "stats:clicks:";
+    public static final String DIRTY_SET = "stats:dirty";
+    public static final String COUNTER_PREFIX = "stats:clicks:";
 
-    static String counterKey(String shortCode) {
+    public static String counterKey(String shortCode) {
         return COUNTER_PREFIX + shortCode;
     }
 

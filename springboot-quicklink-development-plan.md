@@ -498,6 +498,54 @@ Each stage produces something you can run and demo. Build the vertical slice fir
 
 ---
 
+### Stage 6 — Cloud deployment: managed S3 + SQS, Terraform, one VM (3–4 days)
+
+**Goal:** the same code runs against real AWS object storage and a real managed queue, selected by configuration, deployed on a free VM — with the infrastructure described in Terraform rather than clicked together in a console.
+
+**The decision first.** Rent the parts where managed is strictly better and self-host the parts that are the point of the project. Object storage and a queue are commodity: multi-AZ durability and an API that does not care how much you put in it, with nothing interesting to learn from running them. Postgres, Redis, the app instances and the load balancer stay self-hosted — RDS + ElastiCache + an ALB would cost ~$60/month **and delete the parts worth showing**. Say this out loud in the README; "I used managed services" and "I used managed services for these two things, for these reasons" are very different answers in an interview.
+
+1. **Make the S3 client dual-mode.** One `S3Client` bean, two worlds:
+
+   - `app.s3.endpoint` set → local store, `endpointOverride` + `forcePathStyle(true)`, because virtual-host URLs like `http://bucket.seaweedfs:8333` do not resolve.
+   - `app.s3.endpoint` blank → real AWS at the regional endpoint, virtual-host style (the SDK default).
+
+   Two API details that cost time: the **presigner takes path-style through `serviceConfiguration(S3Configuration.builder().pathStyleAccessEnabled(true))`**, not `forcePathStyle`; and `DefaultCredentialsProvider.create()` is deprecated — use `.builder().build()`. Fall through to the default credentials chain when no keys are configured, so the same image needs **no secret at all** on AWS compute, where an instance role supplies them.
+
+   → **verify:** `S3ConfigTest` presigns a URL and asserts the host and the signing scope. Presigning is pure local signing, so **the real-AWS code path is testable with no AWS account and no network** — otherwise it could only be checked by deploying.
+
+2. **Abstract the queue, don't branch on it.** `MediaJobQueue` with one method (`publish`), a Rabbit implementation and an SQS implementation, chosen with `@ConditionalOnProperty(name = "app.queue", havingValue = "rabbit", matchIfMissing = true)`. The worker mirrors it: the compress-and-store logic moves into a transport-agnostic `MediaCompressHandler`, with `@RabbitListener` on one side and a long-polling `SqsQueuePoller` on the other.
+
+   **The fiddly part is the topology beans, not the message code.** With `app.queue=sqs` the Rabbit queue/exchange/binding declarations and both listeners must not exist, or the worker tries to consume from a broker that is not deployed. `RabbitConfig`, `WorkerRabbitConfig`, `MediaCompressListener` and `MediaDlqListener` all become conditional. Boot's own `RabbitAutoConfiguration` can stay enabled: it builds a `CachingConnectionFactory` lazily and **opens no connection until something uses it** — verified by a test whose context starts with no broker anywhere. Anything that *does* use it (the demo inspect endpoint) takes `ObjectProvider<AmqpAdmin>` and degrades instead of failing.
+
+   Writing it twice is what exposes how differently the two brokers think:
+
+   | | RabbitMQ | SQS |
+   |---|---|---|
+   | Who creates the queue | the application, at startup | Terraform; the app never declares topology |
+   | Delivery | the broker pushes to a listener | the consumer long-polls (20s) |
+   | Ack | the channel acks when the listener returns | `DeleteMessage`. **Not deleting is the retry** |
+   | Retries | `listener.simple.retry`, in the app | the queue's visibility timeout; the app has no say |
+   | Dead-lettering | DLX + binding + `default-requeue-rejected: false` | a redrive policy with `maxReceiveCount` |
+   | Deadline on the handler | none | the visibility timeout: slower work gets a second consumer |
+
+   That last row is why idempotency matters *more* on SQS. Note also that SQS has **no consumer count** — nothing registers as a consumer — so "3 consumers" has no equivalent; in-flight message count is the closest thing.
+
+   → **verify:** a Testcontainers test against **ElasticMQ** (`softwaremill/elasticmq-native:1.6.11`, ~130MB, speaks the SQS query API including redrive policies). Four cases: the Rabbit listener bean is *absent*; a job succeeds and the message is **deleted**; a permanent failure marks `FAILED` and deletes; and a job that keeps failing is **redelivered and then moved to the DLQ by the queue itself**, where a DLQ poller records the give-up. Two traps: ElasticMQ returns queue URLs containing *its own* configured address, not the mapped port, so compose the URL yourself from the endpoint; and an autowired `SqsClient` with blank keys goes hunting for a real AWS account, so give the test dummy credentials.
+
+3. **Terraform in `infra/`.** Two buckets (public access blocked, SSE, lifecycle rules), the queue + DLQ with a redrive policy and a `redrive_allow_policy`, an IAM user scoped to exactly those four ARNs, and a **monthly budget alarm with both forecast and actual notifications** — mandatory, because the upload endpoint is public and unauthenticated. Outputs are named after the application's environment variables, so configuring a deployment is `terraform output` rather than transcription.
+
+   Things worth knowing: bucket names are **globally unique across all of AWS**, so suffix them with the account id from `aws_caller_identity` instead of inventing one; `aws_s3_bucket_lifecycle_configuration` requires a `filter {}` block even when empty; `abort_incomplete_multipart_upload` is the rule everyone learns from a bill, because orphaned parts are invisible in the console and billed forever; `sensitive = true` on an output stops it being *printed*, not *stored* — the IAM secret is in `terraform.tfstate` in plain text, which is why state is gitignored and `.terraform.lock.hcl` **is not** (it pins provider checksums, like a lockfile should).
+
+   → **verify:** `terraform validate` with the AWS provider v6 schema catches wrong attribute and resource names offline; `terraform providers lock -platform=darwin_arm64 -platform=linux_amd64` so the lockfile also covers the Linux VM that will run `init`.
+
+4. **Deploy.** A separate `docker-compose.cloud.yml` rather than an override, because three services *disappear* (RabbitMQ, SeaweedFS, the bucket bootstrap) and compose overrides can add services but not remove them. Every value comes from `.env` with `${VAR:?}`, so compose refuses to start with a missing queue URL instead of failing later for an unreadable reason. Blank `APP_S3_ENDPOINT` is what selects real AWS.
+
+   Two environment traps on Oracle Cloud's free tier: traffic is filtered **twice** (the VCN security list *and* iptables rules baked into their Ubuntu image, which need `netfilter-persistent save` to survive a reboot), and the always-free ARM shape is routinely out of capacity. The ARM part costs nothing in code — images are built on the VM and `eclipse-temurin:21` is multi-arch.
+
+**Deliverable:** one codebase, two deployments. `./mvnw test` proves both transports, and `DEPLOY.md` + `infra/` are enough for someone else to stand it up.
+
+---
+
 ## 6. API surface (summary)
 
 | Method | Path                            | Purpose                                                      |
@@ -521,6 +569,7 @@ Each stage produces something you can run and demo. Build the vertical slice fir
   - **Isolate *every* datastore, not just the obvious one.** A test that containerises Postgres but still points at your dev Redis is worse than no isolation: it writes state the other tests read, and the failures look random and depend on test ordering. The same applies one level deeper — any component that reads `spring.data.redis.*` **properties** directly escapes `@ServiceConnection`, which only supplies a `ConnectionDetails` *bean*. Inject `DataRedisConnectionDetails` instead.
   - Anything that creates a bucket must tolerate `409 BucketAlreadyOwnedByYou`, because static containers are shared across a class's tests.
 - **Load-balancer behavior:** start two stub backends, assert round-robin distribution, then kill one and assert requests still succeed (failover), then revive and assert it rejoins.
+- **Cloud code paths without a cloud account.** Two techniques carry their weight here: presigning a URL is *local signing*, so asserting its host and signing scope pins the real-AWS branch of the S3 config with no network at all; and ElasticMQ containerises SQS, so the whole alternate transport — long poll, delete-as-ack, redrive to the DLQ — is covered by `./mvnw test`.
 
 ---
 

@@ -42,3 +42,15 @@ application-local.yaml
 application-local.yml
 application-local.properties
 *.log
+
+### Terraform ###
+# Provider plugins: hundreds of megabytes, re-downloaded by `terraform init`.
+# .terraform.lock.hcl is NOT ignored on purpose: it pins provider versions and
+# checksums, so it belongs in git the same way a package-lock.json does.
+.terraform/
+# State holds the IAM secret access key in plain text. Never commit it.
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.tfvars.example
+crash.log

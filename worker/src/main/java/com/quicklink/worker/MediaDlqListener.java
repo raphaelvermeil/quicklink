@@ -3,6 +3,7 @@ package com.quicklink.worker;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.amqp.rabbit.annotation.RabbitListener;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
 
 /**
@@ -11,6 +12,7 @@ import org.springframework.stereotype.Component;
  * API rather than silently stranded in PROCESSING forever.
  */
 @Component
+@ConditionalOnProperty(name = "app.queue", havingValue = "rabbit", matchIfMissing = true)
 class MediaDlqListener {
 
     private static final Logger log = LoggerFactory.getLogger(MediaDlqListener.class);

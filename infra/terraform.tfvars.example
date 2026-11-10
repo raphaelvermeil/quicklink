@@ -1,0 +1,8 @@
+# Copy to terraform.tfvars (gitignored) and edit.
+
+# Required: where billing alerts go. No default, deliberately.
+budget_notification_email = "you@example.com"
+
+# Optional overrides.
+# aws_region         = "eu-west-3"
+# monthly_budget_usd = 1

@@ -8,10 +8,12 @@ import org.springframework.amqp.core.QueueBuilder;
 import org.springframework.amqp.support.converter.JacksonJavaTypeMapper.TypePrecedence;
 import org.springframework.amqp.support.converter.JacksonJsonMessageConverter;
 import org.springframework.amqp.support.converter.MessageConverter;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
 @Configuration
+@ConditionalOnProperty(name = "app.queue", havingValue = "rabbit", matchIfMissing = true)
 public class WorkerRabbitConfig {
 
     public static final String COMPRESS_QUEUE = "media.compress";
