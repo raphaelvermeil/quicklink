@@ -1,10 +1,8 @@
 package com.quicklink.app;
 
 import org.junit.jupiter.api.Test;
-import org.springframework.boot.test.context.SpringBootTest;
 
-@SpringBootTest
-class AppServiceApplicationTests {
+class AppServiceApplicationTests extends IntegrationTest {
 
 	@Test
 	void contextLoads() {

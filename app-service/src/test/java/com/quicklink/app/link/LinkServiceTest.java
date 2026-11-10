@@ -12,14 +12,13 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.Test;
+import com.quicklink.app.IntegrationTest;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.transaction.annotation.Transactional;
 
-@SpringBootTest
 @Transactional
-class LinkServiceTest {
+class LinkServiceTest extends IntegrationTest {
 
     private static final String KEY_PREFIX = "link:code:";
 

@@ -1,0 +1,486 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Quicklink — Live System</title>
+<style>
+  :root {
+    --bg:#0b0f17; --panel:#121826; --panel2:#0e131f; --line:#243049;
+    --ink:#e6edf7; --dim:#8b9ab3; --faint:#55637d;
+    --accent:#5ea8ff; --ok:#45d483; --warn:#ffb454; --bad:#ff6b6b; --media:#c58cff;
+  }
+  * { box-sizing:border-box; }
+  html,body { margin:0; height:100%; }
+  body {
+    background:var(--bg); color:var(--ink);
+    font:13.5px/1.5 ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+    display:flex; flex-direction:column; overflow:hidden;
+  }
+  code,.mono { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; }
+
+  /* ---------- header / form ---------- */
+  header { border-bottom:1px solid var(--line); padding:12px 18px; display:flex; gap:18px; align-items:center; flex-wrap:wrap; }
+  header h1 { margin:0; font-size:15px; white-space:nowrap; }
+  header h1 small { color:var(--faint); font-weight:400; margin-left:8px; }
+  form { display:flex; gap:8px; align-items:center; flex:1 1 420px; min-width:280px; }
+  input[type=url] {
+    flex:1; min-width:0; font:inherit; padding:8px 11px; border-radius:7px;
+    border:1px solid var(--line); background:#0a0e16; color:var(--ink);
+  }
+  input[type=url]:focus { outline:none; border-color:var(--accent); }
+  button {
+    font:inherit; padding:8px 13px; border-radius:7px; border:1px solid var(--line);
+    background:var(--panel); color:var(--ink); cursor:pointer; white-space:nowrap;
+  }
+  button:hover:not(:disabled) { border-color:var(--accent); background:#16203a; }
+  button:disabled { opacity:.45; cursor:not-allowed; }
+  button.primary { border-color:#2d5c99; background:#16304f; }
+  .result { font-size:12.5px; color:var(--dim); display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+  .result a { color:var(--accent); }
+
+  /* ---------- middle ---------- */
+  main { flex:1 1 auto; display:flex; min-height:0; border-bottom:1px solid var(--line); }
+  #stage { flex:1 1 auto; min-width:0; }
+  svg { width:100%; height:100%; display:block; }
+  #trace {
+    flex:0 0 290px; border-left:1px solid var(--line); background:var(--panel2);
+    overflow-y:auto; padding:8px 12px; font-family:ui-monospace,Menlo,monospace; font-size:11.5px;
+  }
+  #trace .r { padding:3px 0; border-bottom:1px solid #161d2b; display:flex; gap:7px; }
+  #trace .r:last-child { border-bottom:0; }
+  #trace .k { color:#3f4d66; flex:0 0 38px; }
+  .ok{color:var(--ok)} .warn{color:var(--warn)} .bad{color:var(--bad)}
+  .media{color:var(--media)} .dim{color:var(--dim)}
+
+  /* ---------- live tables ---------- */
+  #live { flex:0 0 36%; display:flex; min-height:0; }
+  .pane { flex:1 1 0; min-width:0; border-right:1px solid var(--line); display:flex; flex-direction:column; }
+  .pane:last-child { border-right:0; }
+  .pane h2 {
+    margin:0; padding:7px 12px; font-size:11px; letter-spacing:1.1px; text-transform:uppercase;
+    color:var(--faint); border-bottom:1px solid var(--line); background:var(--panel2);
+    display:flex; justify-content:space-between;
+  }
+  .scroll { overflow:auto; flex:1; }
+  table { width:100%; border-collapse:collapse; font-family:ui-monospace,Menlo,monospace; font-size:11px; }
+  th { position:sticky; top:0; background:#0f1420; color:var(--faint); text-align:left;
+       font-weight:500; padding:5px 9px; border-bottom:1px solid var(--line); white-space:nowrap; }
+  td { padding:4px 9px; border-bottom:1px solid #151c29; white-space:nowrap;
+       overflow:hidden; text-overflow:ellipsis; max-width:230px; }
+  tr.flash td { animation:flash 1.6s ease-out; }
+  @keyframes flash { from { background:#1d3a5c; } to { background:transparent; } }
+  .pill { padding:1px 6px; border-radius:20px; font-size:10px; border:1px solid var(--line); }
+  .pill.PENDING{color:var(--warn);border-color:#4a3a1c}
+  .pill.PROCESSING{color:var(--media);border-color:#3d2a52}
+  .pill.READY{color:var(--ok);border-color:#1e4430}
+  .pill.FAILED{color:var(--bad);border-color:#4d2222}
+  .empty { padding:10px 12px; color:var(--faint); font-size:11.5px; }
+
+  /* ---------- svg ---------- */
+  .box { fill:var(--panel); stroke:var(--line); stroke-width:1.4; }
+  .box.hot { stroke:var(--accent); filter:url(#glow); }
+  .box.hotm { stroke:var(--media); filter:url(#glow); }
+  .nlabel { fill:var(--ink); font-size:12px; font-weight:600; }
+  .nsub { fill:var(--dim); font-size:9.5px; }
+  .nbadge { font-size:9.5px; font-family:ui-monospace,Menlo,monospace; }
+  .edge { stroke:#1b2335; stroke-width:1.4; fill:none; }
+  @media (max-width:900px) {
+    main { flex-direction:column; } #trace { flex:0 0 120px; border-left:0; border-top:1px solid var(--line); }
+    #live { flex:0 0 46%; } .pane:nth-child(3){ display:none; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Quicklink <small>live system</small></h1>
+  <form id="f">
+    <input id="url" type="url" placeholder="https://example.com/a/very/long/url/to/shorten" required
+           value="https://example.com/docs/some/deep/page?ref=readme">
+    <button class="primary" type="submit">Shorten</button>
+    <button type="button" id="b-follow">Follow it</button>
+    <button type="button" id="b-upload">Upload image</button>
+    <button type="button" id="b-burst">Burst 12</button>
+  </form>
+  <div class="result" id="result"></div>
+</header>
+
+<main>
+  <div id="stage">
+    <svg id="svg" viewBox="0 0 1040 430" preserveAspectRatio="xMidYMid meet">
+      <defs>
+        <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
+          <feGaussianBlur stdDeviation="3" result="b"/>
+          <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+        </filter>
+      </defs>
+      <g id="edges"></g><g id="nodes"></g><g id="packets"></g>
+    </svg>
+  </div>
+  <div id="trace"></div>
+</main>
+
+<section id="live">
+  <div class="pane">
+    <h2><span>Postgres · link</span><span id="c-links" class="dim"></span></h2>
+    <div class="scroll" id="t-links"></div>
+  </div>
+  <div class="pane">
+    <h2><span>Redis</span><span id="c-redis" class="dim"></span></h2>
+    <div class="scroll" id="t-redis"></div>
+  </div>
+  <div class="pane">
+    <h2><span>Queue &amp; media</span><span id="c-q" class="dim"></span></h2>
+    <div class="scroll" id="t-queue"></div>
+  </div>
+</section>
+
+<script>
+// ======================================================= diagram layout
+const N = {
+  you:   { x: 22, y:186, w: 92, h:48, label:"you",       sub:"this browser" },
+  lb:    { x:158, y:186, w:112, h:48, label:"edge-lb",   sub:":8080" },
+  app1:  { x:318, y: 96, w:112, h:44, label:"app-1",     sub:"" },
+  app2:  { x:318, y:186, w:112, h:44, label:"app-2",     sub:"" },
+  app3:  { x:318, y:276, w:112, h:44, label:"app-3",     sub:"" },
+  redis: { x:492, y: 34, w:126, h:50, label:"Redis",     sub:"cache·bucket·clicks" },
+  pg:    { x:492, y:186, w:126, h:50, label:"Postgres",  sub:"link·stats·assets" },
+  s3:    { x:492, y:340, w:126, h:50, label:"SeaweedFS", sub:"originals/processed" },
+  mq:    { x:688, y:262, w:116, h:46, label:"RabbitMQ",  sub:"media.compress" },
+  work:  { x:860, y:262, w:116, h:46, label:"worker ×3", sub:"consumers" },
+  dlq:   { x:688, y:344, w:116, h:40, label:"…dlq",      sub:"poison" }
+};
+const E = [["you","lb"],["lb","app1"],["lb","app2"],["lb","app3"],
+  ["app1","redis"],["app2","redis"],["app3","redis"],
+  ["app1","pg"],["app2","pg"],["app3","pg"],
+  ["app1","s3"],["app2","s3"],["app3","s3"],
+  ["app1","mq"],["app2","mq"],["app3","mq"],
+  ["redis","pg"],["mq","work"],["work","s3"],["work","pg"],["mq","dlq"]];
+
+const NS="http://www.w3.org/2000/svg";
+const svg=document.getElementById("svg");
+const el=(t,a={})=>{const n=document.createElementNS(NS,t);for(const k in a)n.setAttribute(k,a[k]);return n;};
+const cx=n=>n.x+n.w/2, cy=n=>n.y+n.h/2;
+const curve=(a,b)=>{const mx=(cx(a)+cx(b))/2;return `M ${cx(a)} ${cy(a)} C ${mx} ${cy(a)}, ${mx} ${cy(b)}, ${cx(b)} ${cy(b)}`;};
+
+const paths={}, boxes={}, badges={}, subs={};
+for (const [f,t] of E) {
+  const p=el("path",{class:"edge",d:curve(N[f],N[t])});
+  document.getElementById("edges").appendChild(p); paths[f+">"+t]=p;
+}
+for (const k in N) {
+  const n=N[k], g=el("g");
+  const r=el("rect",{class:"box",x:n.x,y:n.y,width:n.w,height:n.h,rx:9});
+  const lb=Object.assign(el("text",{class:"nlabel",x:n.x+11,y:n.y+20}),{textContent:n.label});
+  const sb=Object.assign(el("text",{class:"nsub",x:n.x+11,y:n.y+33}),{textContent:n.sub});
+  const bd=el("text",{class:"nbadge",x:n.x+11,y:n.y+n.h-6,fill:"var(--ok)"});
+  g.append(r,lb,sb,bd);
+  document.getElementById("nodes").appendChild(g);
+  boxes[k]=r; badges[k]=bd; subs[k]=sb;
+}
+
+const setBadge=(k,txt,cls)=>{badges[k].textContent=txt||"";
+  badges[k].setAttribute("fill",cls==="warn"?"var(--warn)":cls==="bad"?"var(--bad)":cls==="media"?"var(--media)":"var(--ok)");};
+const pulse=(k,m)=>{boxes[k].classList.add(m?"hotm":"hot");setTimeout(()=>boxes[k].classList.remove("hot","hotm"),620);};
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+
+/** Moves a dot along the drawn edge between two nodes, then lights the target. */
+function travel(from,to,colour,ms=460){
+  return new Promise(res=>{
+    const fwd=paths[from+">"+to], back=paths[to+">"+from];
+    const reverse=!fwd;
+    let probe=fwd||back, temp=false;
+    if(!probe){ probe=el("path",{d:curve(N[from],N[to]),fill:"none",stroke:"none"}); svg.appendChild(probe); temp=true; }
+    const len=probe.getTotalLength();
+    const dot=el("circle",{r:4.5,fill:colour,filter:"url(#glow)"});
+    document.getElementById("packets").appendChild(dot);
+    const t0=performance.now();
+    (function step(now){
+      const k=Math.min(1,(now-t0)/ms);
+      const pt=probe.getPointAtLength((reverse?1-k:k)*len);
+      dot.setAttribute("cx",pt.x); dot.setAttribute("cy",pt.y);
+      if(k<1) return requestAnimationFrame(step);
+      dot.remove(); if(temp) probe.remove();
+      pulse(to, colour==="var(--media)"); res();
+    })(t0);
+  });
+}
+
+// ======================================================= trace log
+const traceEl=document.getElementById("trace");
+let step=0;
+function trace(msg,cls=""){
+  const r=document.createElement("div"); r.className="r";
+  const k=document.createElement("div"); k.className="k"; k.textContent=String(++step).padStart(2,"0");
+  const m=document.createElement("div"); m.className=cls; m.style.flex="1"; m.innerHTML=msg;
+  r.append(k,m); traceEl.append(r); traceEl.scrollTop=traceEl.scrollHeight;
+}
+function newRun(title){ traceEl.innerHTML=""; step=0; trace(title,"dim"); }
+
+// ======================================================= live tables
+const esc=s=>String(s??"").replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
+const short=(s,n=34)=>{s=String(s??"");return s.length>n?s.slice(0,n)+"…":s;};
+let knownLinkIds=new Set(), knownRedisKeys=new Set(), firstPaint=true;
+
+function table(cols, rows, flashKey, known) {
+  if(!rows.length) return `<div class="empty">empty</div>`;
+  const head=cols.map(c=>`<th>${c.h}</th>`).join("");
+  const body=rows.map(r=>{
+    const id=flashKey?r[flashKey]:null;
+    const isNew=!firstPaint && id!=null && known && !known.has(id);
+    if(id!=null && known) known.add(id);
+    return `<tr class="${isNew?"flash":""}">${cols.map(c=>`<td title="${esc(c.v(r))}">${c.r?c.r(r):esc(short(c.v(r)))}</td>`).join("")}</tr>`;
+  }).join("");
+  return `<table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`;
+}
+
+async function refreshLive(){
+  try{
+    const [links, redis, queues, media] = await Promise.all([
+      fetch("/api/inspect/links?limit=8").then(r=>r.json()),
+      fetch("/api/inspect/redis").then(r=>r.json()),
+      fetch("/api/inspect/queues").then(r=>r.json()),
+      fetch("/api/inspect/media?limit=5").then(r=>r.json())
+    ]);
+
+    document.getElementById("t-links").innerHTML = table([
+      {h:"short_code", v:r=>r.short_code, r:r=>`<b>${esc(r.short_code)}</b>`},
+      {h:"type",       v:r=>r.target_type},
+      {h:"target",     v:r=>r.target_url ?? ("asset #"+r.media_asset_id)},
+      {h:"clicks",     v:r=>r.persisted_clicks}
+    ], links, "id", knownLinkIds);
+    document.getElementById("c-links").textContent = links.length + " newest";
+
+    const flat=[];
+    for (const [group, rows] of Object.entries(redis))
+      rows.forEach(r=>flat.push({group, ...r}));
+    document.getElementById("t-redis").innerHTML = table([
+      {h:"key",   v:r=>r.key, r:r=>`<b>${esc(short(r.key,28))}</b>`},
+      {h:"value", v:r=>r.value},
+      {h:"ttl",   v:r=>r.ttl===-1?"∞":(r.ttl==null?"":r.ttl+"s")}
+    ], flat, "key", knownRedisKeys);
+    document.getElementById("c-redis").textContent = flat.length + " keys";
+
+    const qRows = queues.map(q=>({a:q.name, b:q.messages+" msg", c:q.consumers+" consumers"}))
+      .concat(media.map(m=>({a:"asset #"+m.id, b:`<span class="pill ${m.status}">${m.status}</span>`,
+        c:m.processed_bytes?`${m.original_bytes}→${m.processed_bytes}`:(m.error_message?short(m.error_message,22):"—")})));
+    document.getElementById("t-queue").innerHTML = table([
+      {h:"what", v:r=>r.a, r:r=>`<b>${esc(r.a)}</b>`},
+      {h:"",     v:r=>r.b, r:r=>r.b},
+      {h:"",     v:r=>r.c, r:r=>r.c}
+    ], qRows, null, null);
+    document.getElementById("c-q").textContent = (queues[0]?.consumers ?? "?") + " consumers";
+
+    firstPaint=false;
+  }catch(e){ /* a refresh failing must never break an animation */ }
+}
+
+// ======================================================= helpers
+const BLUE="var(--accent)", PURPLE="var(--media)", RED="var(--bad)";
+let newest=null;
+const allButtons=()=>[...document.querySelectorAll("button")];
+async function exclusive(fn){
+  allButtons().forEach(b=>b.disabled=true);
+  try{ await fn(); }catch(e){ trace("failed: "+esc(e.message),"bad"); }
+  await refreshLive();
+  allButtons().forEach(b=>b.disabled=false);
+}
+const served=res=>res.headers.get("X-Instance-Id")||"?";
+/** Pins each real container id to a diagram slot, first-seen order. */
+const slots=new Map();
+function slotFor(id){
+  if(!slots.has(id)){
+    const taken=new Set(slots.values());
+    const free=["app1","app2","app3"].find(k=>!taken.has(k))||"app2";
+    slots.set(id,free);
+    subs[free].textContent=id.slice(0,10);
+  }
+  return slots.get(id);
+}
+function showResult(html){ document.getElementById("result").innerHTML=html; }
+
+// ======================================================= shorten
+async function shorten(){
+  const longUrl=document.getElementById("url").value.trim();
+  if(!longUrl){ trace("enter a URL first","warn"); return; }
+  newRun(`POST /api/links · ${esc(short(longUrl,40))}`);
+
+  await travel("you","lb",BLUE);
+  trace("edge-lb picks a healthy backend (round-robin)","dim");
+
+  const res=await fetch("/api/links",{method:"POST",
+    headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({longUrl})});
+
+  const who=served(res), slot=slotFor(who);
+  setBadge("lb","→ "+who.slice(0,6));
+  await travel("lb",slot,BLUE);
+  trace(`served by <b>${esc(who.slice(0,10))}</b>`,"dim");
+
+  const left=res.headers.get("X-Rate-Limit-Remaining");
+  if(left!==null){
+    await travel(slot,"redis",BLUE);
+    setBadge("redis","tokens "+left,left==="0"?"warn":"");
+    trace(`token taken from the Redis bucket · <b>${left}</b> left`,"dim");
+  }
+
+  if(res.status===429){
+    setBadge("lb","429","bad"); trace("429 Too Many Requests","bad");
+    showResult(`<span class="bad">rate limited — wait ${esc(res.headers.get("Retry-After"))}s</span>`);
+    return;
+  }
+  if(res.status===400){
+    setBadge("lb","400","bad"); trace("400 — the URL failed @Valid/@URL","bad");
+    showResult(`<span class="bad">400 — not a valid URL</span>`); return;
+  }
+
+  const body=await res.json();
+  newest=body.shortCode;
+  await travel(slot,"pg",BLUE);
+  setBadge("pg","INSERT link");
+  trace(`row written · short_code <b>${esc(body.shortCode)}</b>`,"ok");
+
+  await travel("pg",slot,BLUE,330);
+  await travel(slot,"lb",BLUE,330);
+  await travel("lb","you",BLUE,330);
+  trace("201 Created","ok");
+  showResult(`<span class="ok">201</span> <a href="/${esc(body.shortCode)}" target="_blank" class="mono">${esc(body.shortUrl)}</a>
+              <button type="button" id="b-copy">copy</button>`);
+  document.getElementById("b-copy").onclick=()=>navigator.clipboard.writeText(body.shortUrl);
+}
+
+// ======================================================= follow
+async function follow(){
+  if(!newest){ trace("shorten something first","warn"); return; }
+  newRun(`GET /${esc(newest)}`);
+
+  // Observe the cache BEFORE the request, so hit-vs-miss is measured, not asserted.
+  const key="link:code:"+newest;
+  const before=await fetch("/api/inspect/redis").then(r=>r.json());
+  const cachedBefore=before.cache.some(k=>k.key===key);
+  trace(cachedBefore?"cache already holds this code → expect a HIT":"cache has no entry → expect a MISS","dim");
+
+  const statsBefore=await fetch(`/api/links/${newest}/stats`).then(r=>r.json());
+  await travel("you","lb",BLUE);
+  await fetch("/"+newest,{redirect:"manual"});   // opaque by design; proof comes below
+
+  const res=await fetch(`/api/links/${newest}/stats`);
+  const statsAfter=await res.json();
+  const slot=slotFor(served(res));
+  await travel("lb",slot,BLUE);
+  await travel(slot,"redis",BLUE);
+
+  const after=await fetch("/api/inspect/redis").then(r=>r.json());
+  const cachedAfter=after.cache.find(k=>k.key===key);
+  if(!cachedBefore && cachedAfter){
+    await travel(slot,"pg",BLUE);
+    trace("MISS → read Postgres, then cached","warn");
+    await travel("pg",slot,BLUE,330);
+    setBadge("redis",`cached ${cachedAfter.ttl}s`);
+    trace(`cache populated with TTL <b>${cachedAfter.ttl}s</b>`,"ok");
+  } else if(cachedAfter){
+    setBadge("redis","cache HIT");
+    trace("HIT → Postgres never touched","ok");
+  }
+
+  if(statsAfter.clicks>statsBefore.clicks){
+    trace(`302 issued · Redis INCR → <b>${statsAfter.clicks}</b> clicks`,"ok");
+    await travel("redis","pg",BLUE,620);
+    setBadge("pg","write-behind");
+    trace("flushed to Postgres every 60s, not per click","dim");
+  }
+  showResult(`<span class="ok">302</span> <span class="dim">clicks now ${statsAfter.clicks}</span>`);
+}
+
+// ======================================================= upload
+async function pngBlob(size){
+  const c=document.createElement("canvas"); c.width=c.height=size;
+  const g=c.getContext("2d");
+  for(let y=0;y<size;y+=6) for(let x=0;x<size;x+=6){
+    g.fillStyle=`rgb(${(x*7)%256},${(y*5)%256},${(x+y)%256})`; g.fillRect(x,y,6,6);
+  }
+  return new Promise(r=>c.toBlob(r,"image/png"));
+}
+
+async function upload(){
+  newRun("POST /api/media (multipart)");
+  const form=new FormData();
+  form.append("file", await pngBlob(900), "generated.png");
+
+  await travel("you","lb",PURPLE);
+  const res=await fetch("/api/media",{method:"POST",body:form});
+  if(res.status===429){ setBadge("lb","429","bad"); trace("429","bad"); return; }
+
+  const who=served(res), slot=slotFor(who);
+  setBadge("lb","→ "+who.slice(0,6));
+  await travel("lb",slot,PURPLE);
+
+  const body=await res.json(); newest=body.shortCode;
+  await travel(slot,"s3",PURPLE); setBadge("s3","originals +1","media");
+  trace("original streamed to object storage","media");
+  await travel(slot,"pg",PURPLE); setBadge("pg","PENDING","media");
+  await travel(slot,"mq",PURPLE); setBadge("mq","queued","media");
+  trace(`202 Accepted · <b>${esc(body.shortCode)}</b> — request ends here`,"media");
+  showResult(`<span class="media">202 PENDING</span> <span class="mono dim">${esc(body.shortCode)}</span>`);
+  await refreshLive();
+
+  trace("— nothing is on the request thread now —","dim");
+  await travel("mq","work",PURPLE); setBadge("work","compressing","media");
+
+  let s=null;
+  for(let i=0;i<60;i++){
+    s=await fetch(`/api/media/${newest}/status`).then(r=>r.json());
+    if(s.status==="READY"||s.status==="FAILED") break;
+    if(s.status==="PROCESSING") setBadge("pg","PROCESSING","media");
+    await refreshLive(); await sleep(400);
+  }
+
+  if(s&&s.status==="READY"){
+    await travel("work","s3",PURPLE); setBadge("s3","processed +1","media");
+    await travel("work","pg",PURPLE); setBadge("pg","READY"); setBadge("work","idle");
+    const pct=Math.round(100*s.processedBytes/s.originalBytes);
+    trace(`READY · ${s.originalBytes.toLocaleString()} → <b>${s.processedBytes.toLocaleString()}</b> bytes (${pct}%)`,"ok");
+    showResult(`<span class="ok">READY</span> <a href="/${esc(newest)}" target="_blank">open the image</a>
+                <span class="dim">302 → presigned URL</span>`);
+  } else if(s&&s.status==="FAILED"){
+    await travel("mq","dlq",RED); setBadge("dlq","1","bad"); setBadge("pg","FAILED","bad");
+    trace(`FAILED · ${esc(s.errorMessage)} — dead-lettered`,"bad");
+  } else { trace("still processing — is the worker running?","warn"); }
+}
+
+// ======================================================= burst
+async function burst(){
+  newRun("12 creates · the shared bucket holds 10");
+  let ok=0,limited=0;
+  for(let i=1;i<=12;i++){
+    const res=await fetch("/api/links",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({longUrl:"https://example.com/burst/"+i+"/"+Date.now()})});
+    const slot=slotFor(served(res));
+    const left=res.headers.get("X-Rate-Limit-Remaining");
+    if(res.status===429){
+      limited++; setBadge("redis","empty","bad");
+      await travel("lb",slot,RED,130);
+      trace(`#${i} 429 · Retry-After ${esc(res.headers.get("Retry-After"))}s`,"bad");
+    } else {
+      ok++; setBadge("redis","tokens "+left,left==="0"?"warn":"");
+      await travel("lb",slot,BLUE,130);
+      trace(`#${i} 201 · ${esc(left)} tokens left`,left==="0"?"warn":"dim");
+    }
+  }
+  trace(`${ok} created, ${limited} rejected — one bucket, three instances`,"warn");
+  showResult(`<span class="warn">${ok} created · ${limited} rate limited</span>`);
+}
+
+// ======================================================= wiring
+document.getElementById("f").addEventListener("submit", e=>{ e.preventDefault(); exclusive(shorten); });
+document.getElementById("b-follow").onclick=()=>exclusive(follow);
+document.getElementById("b-upload").onclick=()=>exclusive(upload);
+document.getElementById("b-burst").onclick=()=>exclusive(burst);
+
+trace("paste a URL and press Shorten","dim");
+refreshLive();
+setInterval(refreshLive, 2500);
+</script>
+</body>
+</html>

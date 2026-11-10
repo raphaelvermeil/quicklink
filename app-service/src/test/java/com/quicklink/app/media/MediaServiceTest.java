@@ -4,13 +4,13 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
+import com.quicklink.app.IntegrationTest;
 import com.quicklink.app.link.Link;
 import com.quicklink.app.link.LinkRepository;
 import com.quicklink.app.link.TargetType;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.mock.web.MockMultipartFile;
 import org.springframework.transaction.annotation.Transactional;
 import software.amazon.awssdk.services.s3.S3Client;
@@ -20,9 +20,8 @@ import software.amazon.awssdk.services.s3.S3Client;
  * AFTER_COMMIT publisher never fires and these tests leave the queue untouched.
  * S3 has no transaction, so each test deletes the object it uploaded.
  */
-@SpringBootTest
 @Transactional
-class MediaServiceTest {
+class MediaServiceTest extends IntegrationTest {
 
     private static final byte[] CONTENT = "not-really-a-png-but-bytes-are-bytes".getBytes();
 

@@ -8,28 +8,56 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import java.time.Duration;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import com.quicklink.app.IntegrationTest;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.test.context.SpringBootTest;
+import java.util.ArrayList;
+import java.util.List;
+import org.junit.jupiter.api.AfterEach;
 import org.springframework.data.redis.core.StringRedisTemplate;
-import org.springframework.transaction.annotation.Transactional;
+import org.springframework.jdbc.core.JdbcTemplate;
 
-@SpringBootTest
-@Transactional
-class ClickStatsFlusherTest {
+/**
+ * Deliberately NOT @Transactional. ClickStatsWriter runs each delta in a
+ * REQUIRES_NEW transaction, which by design cannot see rows an enclosing test
+ * transaction has not committed — the link would be invisible, the write would hit
+ * link_stats' foreign key, and the assertion would fail for the wrong reason.
+ * So these tests commit for real and clean up afterwards.
+ */
+class ClickStatsFlusherTest extends IntegrationTest {
 
     @Autowired LinkService linkService;
     @Autowired ClickStatsFlusher flusher;
     @Autowired LinkStatsRepository statsRepository;
     @Autowired StringRedisTemplate redis;
+    @Autowired JdbcTemplate jdbc;
 
     private static final String LOCK_KEY = "stats:flush:lock";
 
+    private final List<String> created = new ArrayList<>();
+
     @BeforeEach
     void clearPendingWork() {
-        // Redis does not roll back with the test transaction, so drop any dirty
-        // codes left behind by other tests before exercising the flusher.
         redis.delete(ClickCounters.DIRTY_SET);
         redis.delete(LOCK_KEY);
+    }
+
+    @AfterEach
+    void removeWhatThisTestCommitted() {
+        redis.delete(ClickCounters.DIRTY_SET);
+        redis.delete(LOCK_KEY);
+        for (String code : created) {
+            redis.delete(ClickCounters.counterKey(code));
+            jdbc.update("DELETE FROM link_stats WHERE short_code = ?", code);
+            jdbc.update("DELETE FROM link WHERE short_code = ?", code);
+        }
+        created.clear();
+    }
+
+    /** Creates a committed link and remembers it for cleanup. */
+    private String newLink(String url) {
+        String code = linkService.createLink(url, null).getShortCode();
+        created.add(code);
+        return code;
     }
 
     private void seedCounter(String code, long count) {
@@ -39,7 +67,7 @@ class ClickStatsFlusherTest {
 
     @Test
     void movesCountersFromRedisIntoPostgres() {
-        String code = linkService.createLink("https://example.com/flushed", null).getShortCode();
+        String code = newLink("https://example.com/flushed");
         seedCounter(code, 5);
 
         flusher.flush();
@@ -52,7 +80,7 @@ class ClickStatsFlusherTest {
     /** The upsert must ADD to an existing row, not overwrite it. */
     @Test
     void accumulatesAcrossSuccessiveFlushes() {
-        String code = linkService.createLink("https://example.com/twice", null).getShortCode();
+        String code = newLink("https://example.com/twice");
 
         seedCounter(code, 3);
         flusher.flush();
@@ -64,7 +92,7 @@ class ClickStatsFlusherTest {
 
     @Test
     void removesTheCodeFromTheDirtySetOnceDrained() {
-        String code = linkService.createLink("https://example.com/dirty", null).getShortCode();
+        String code = newLink("https://example.com/dirty");
         seedCounter(code, 2);
 
         flusher.flush();
@@ -87,7 +115,7 @@ class ClickStatsFlusherTest {
 
     @Test
     void skipsFlushWhileAnotherInstanceHoldsTheLock() {
-        String code = linkService.createLink("https://example.com/locked", null).getShortCode();
+        String code = newLink("https://example.com/locked");
         seedCounter(code, 6);
 
         // simulate a different instance already flushing
@@ -106,7 +134,7 @@ class ClickStatsFlusherTest {
 
     @Test
     void releasesTheLockAfterFlushing() {
-        String code = linkService.createLink("https://example.com/unlocked", null).getShortCode();
+        String code = newLink("https://example.com/unlocked");
         seedCounter(code, 2);
 
         flusher.flush();

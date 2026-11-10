@@ -1,42 +1,69 @@
 # Quicklink
 
-A URL shortener built on **Spring Boot 4 / Java 21**, backed by **Postgres** for
-durability and **Redis** for the hot path. It shortens a long URL to a Base62
-code, serves the redirect out of cache, counts clicks without touching the
-database on every hit, and rate-limits creation across instances.
+A URL shortener and async media pipeline on **Spring Boot 4 / Java 21**, running as
+three stateless app instances behind a **load balancer I wrote from scratch**, with a
+pool of three workers compressing uploads off the request thread.
 
-The interesting part isn't the shortening — it's everything around it: the
-read-through cache with negative caching, the write-behind click counter, and a
-distributed token bucket that still holds when you run more than one copy of the
-service.
+The shortening is the boring part. The project exists for everything around it:
+cache-aside with negative caching, write-behind click counting, a rate limiter that
+still holds when you add instances, leader election for a scheduled job, and a
+producer/consumer pipeline with idempotency and a dead-letter queue.
+
+I built the load balancer by hand to understand what nginx and HAProxy do for me.
+Measuring it changed two of my design decisions — both are written up below.
 
 ---
 
-## Quick start
-
-Requires **Java 21** and **Docker**.
+## See it working
 
 ```bash
-docker compose up -d          # Postgres on 5434, Redis on 6380
-./mvnw -pl app-service spring-boot:run
+docker compose up -d --build        # Postgres, Redis, RabbitMQ, SeaweedFS,
+                                    # 3 app instances, 3 workers, the load balancer
+open http://localhost:8080
 ```
 
-The service listens on **8081**. Flyway runs the migrations on boot.
+`http://localhost:8080` serves a **live architecture visualisation**. Press a button and
+it animates a real request through the real system — there is no canned data:
 
-```bash
-# shorten
-curl -X POST localhost:8081/api/links \
-  -H 'Content-Type: application/json' \
-  -d '{"longUrl":"https://example.com/some/very/long/path"}'
-# → 201 {"shortCode":"10000","shortUrl":"http://localhost:8081/10000"}
+| Button | What you watch happen |
+|---|---|
+| **Create a short link** | the load balancer picking an instance, a token leaving the Redis bucket, the row landing in Postgres |
+| **Follow the link** | the `302`, and the click counter incrementing in Redis rather than the database |
+| **Upload an image** | the request ending at `202 PENDING`, then the queue, a worker, both buckets, and the status flipping to `READY` with the real byte counts |
+| **Burst 12 creates** | the shared bucket draining to zero and the last two requests getting `429` |
 
-# follow it
-curl -i localhost:8081/10000
-# → 302, Location: https://example.com/some/very/long/path
+Which instance lit up comes from the `X-Instance-Id` response header. The token count is
+`X-Rate-Limit-Remaining`. The compression ratio is read back from the status endpoint.
+Everything on screen happened.
 
-# click count
-curl localhost:8081/api/links/10000/stats
-# → {"shortCode":"10000","clicks":1}
+---
+
+## Architecture
+
+```
+                    ┌──────────────┐
+   you ───────────► │   edge-lb    │  :8080   plain Java, zero dependencies
+                    │ round-robin  │          virtual thread per request
+                    └──────┬───────┘          health checks + retry failover
+                 ┌─────────┼─────────┐
+            ┌────▼───┐ ┌───▼────┐ ┌──▼─────┐
+            │ app-1  │ │ app-2  │ │ app-3  │  :8081, stateless, not published
+            └────┬───┘ └───┬────┘ └───┬────┘
+         ┌───────┴─────────┴──────────┴────────┐
+         │                 │                  │
+    ┌────▼─────┐    ┌──────▼─────┐      ┌─────▼──────┐
+    │  Redis   │    │  Postgres  │      │ SeaweedFS  │
+    │ cache    │    │ links      │      │ originals  │
+    │ buckets  │───►│ stats      │      │ processed  │
+    │ counters │ ▲  │ assets     │      └─────▲──────┘
+    └──────────┘ │  └────────────┘            │
+                 │   write-behind             │
+                 │   flush (60s)         ┌────┴─────┐
+                            ┌──────────┐ │ worker×3 │
+                            │ RabbitMQ ├─► competing│
+                            │ .compress│ │ consumers│
+                            └────┬─────┘ └──────────┘
+                                 └──► media.compress.dlq
 ```
 
 ---
@@ -45,10 +72,16 @@ curl localhost:8081/api/links/10000/stats
 
 | Method | Path | Behaviour |
 |--------|------|-----------|
-| `POST` | `/api/links` | `{longUrl, expiresAt?}` → `201 {shortCode, shortUrl}`. Validates the URL; rate-limited per IP. |
-| `GET` | `/{shortCode}` | `302` to the target. `404` if unknown or expired. Codes are 5–16 alphanumerics, so this never shadows `/api/...` or `/actuator/...`. |
-| `GET` | `/api/links/{shortCode}/stats` | `{shortCode, clicks}` — persisted count plus whatever is still pending in Redis. |
-| `GET` | `/actuator/health`, `/actuator/info` | Actuator. |
+| `POST` | `/api/links` | `{longUrl, expiresAt?}` → `201 {shortCode, shortUrl}`. Validated, rate-limited per client. |
+| `POST` | `/api/media` | multipart → `202 {shortCode, status:"PENDING"}`. Returns before any compression happens. |
+| `GET` | `/{shortCode}` | URL link → `302`. Media → `302` to a presigned URL (`READY`), `202` (`PENDING`/`PROCESSING`), or `410 Gone` (`FAILED`). |
+| `GET` | `/api/links/{shortCode}/stats` | `{shortCode, clicks}` — persisted plus whatever is still pending in Redis. |
+| `GET` | `/api/media/{shortCode}/status` | status, byte counts, and the error message if it failed. |
+| `GET` | `/actuator/health` | aggregate health, including Postgres and Redis. For monitoring. |
+| `GET` | `/actuator/health/readiness` | what the load balancer polls — deliberately excludes the datastores. |
+
+Short codes are 5–16 alphanumerics, enforced by the route pattern, so `/{shortCode}` can
+never shadow `/api/…`, `/actuator/…` or the static page.
 
 ---
 
@@ -56,69 +89,139 @@ curl localhost:8081/api/links/10000/stats
 
 ### Short codes
 
-Codes come from a Postgres sequence (`link_code_seq`) Base62-encoded — no random
-generation, so **no collision check and no retry loop**: one `nextval`, one
-`INSERT`. The sequence starts at `14776336` (62⁴), which guarantees every code is
-at least five characters.
+A Postgres sequence, Base62-encoded. No randomness, so **no collision check and no retry
+loop** — uniqueness comes from the counter and base conversion is a bijection. The
+sequence starts at 62⁴, which guarantees every code is at least five characters.
 
-The tradeoff is that codes are **enumerable** — `10000` implies `10001` probably
-exists. That's accepted deliberately; the mitigation is rate limiting rather than
-obfuscating the counter, since XOR-ing it with a fixed key only hides creation
-order from someone who hasn't seen a few pairs.
+There are two sequences, not one, and the reason is specific. `short_code` is `NOT NULL`,
+so the code must exist *before* the `INSERT` — but `repository.save()` does not send SQL;
+it captures the entity's values and queues the insert, so anything set afterwards becomes a
+separate `UPDATE` that arrives too late. The primary key comes from a sequence Hibernate
+calls privately inside `save()`, so it is unavailable beforehand. A second sequence that the
+service calls itself solves it, and decouples the public identifier from the primary key.
+
+The tradeoff: codes are **enumerable**. Rate limiting is the mitigation, not obfuscation —
+XOR-ing the counter only hides creation order from someone who has not seen a few pairs.
 
 ### The redirect path
 
-`GET /{code}` tries Redis first and only falls through to Postgres on a miss:
+Redis first, Postgres only on a miss. TTL is capped at an hour and clamped to the link's own
+expiry, so a cached entry can never outlive the link. An unknown code caches a `__missing__`
+sentinel for 30 seconds — without that, a flood of requests for nonexistent codes is a flood
+of database reads, which is exactly the traffic a cache should absorb.
 
-- **Hit** → return the cached target immediately.
-- **Miss** → read Postgres, cache the target, return it. TTL is capped at **1
-  hour** and clamped to the link's own expiry, so a cached entry can never
-  outlive the link.
-- **Unknown or expired** → cache a `__missing__` sentinel for **30 seconds** and
-  return `404`. This negative caching is what stops a flood of requests for
-  nonexistent codes from becoming a flood of database reads.
+Media links are **deliberately not cached**: their status changes while the worker runs, and
+a presigned URL expires. Presigning is local HMAC work, so regenerating per request is cheap.
 
 ### Click counting
 
-Counting on the redirect path would put a write on every single hit, so it's
-**write-behind** instead:
+Counting on the redirect path would put a write on every hit and make the most popular link
+the slowest, so it is **write-behind**: `INCR` in Redis plus a dirty-set entry, and a
+scheduled job folds the deltas into Postgres every 60 seconds with
+`INSERT … ON CONFLICT DO UPDATE`.
 
-1. Each redirect does an `INCR` on `stats:clicks:{code}` and adds the code to a
-   `stats:dirty` set — two Redis ops, no database.
-2. `ClickStatsFlusher` wakes every 60 s, drains the dirty set, and folds each
-   delta into Postgres with an `INSERT … ON CONFLICT DO UPDATE`. It removes the
-   code from the dirty set *before* reading the counter, so a click arriving
-   mid-flush re-marks the code rather than being dropped.
-3. The stats endpoint returns persisted + pending, so the number is never stale
-   even between flushes.
+Two details that are easy to get wrong. The drain uses `GETDEL`, not `GET` then `DEL` —
+anything incrementing between two separate calls would be lost silently. And it removes the
+code from the dirty set *before* reading the counter, so a click arriving mid-flush re-marks
+the code instead of vanishing.
 
 ### Rate limiting
 
-`RateLimitFilter` guards **only** `POST /api/links` — redirects stay fast and
-unmetered. It's a **Bucket4j** token bucket (default 10 per 60 s per IP) stored
-in Redis via Lettuce with CAS, so the limit is shared by every instance of the
-service rather than being per-process. Allowed requests get
-`X-Rate-Limit-Remaining`; rejected ones get `429` and `Retry-After`.
+A Bucket4j token bucket (10 per 60 s per client) held **in Redis**, guarding only
+`POST /api/links` — redirects stay unmetered. The app holds the *rules*; Redis holds the
+*counts*, so adding instances does not multiply the limit.
 
-One wrinkle worth knowing: `RateLimitConfig` builds its Redis client from
-`DataRedisConnectionDetails`, not from the `spring.data.redis.*` properties.
-Testcontainers' `@ServiceConnection` supplies a connection-details bean and
-leaves the properties alone, so reading the properties directly would make tests
-quietly talk to the developer's local Redis instead of the container.
+Behind the load balancer the client IP needs `X-Forwarded-For`, which `edge-lb` sets and
+`server.forward-headers-strategy: framework` makes Spring trust. That setting is only safe
+because the app instances publish no host ports — the proxy is the only way in. Reachable
+instances plus a trusted header means any client can spoof its way to a fresh bucket.
 
-### Schema
+### The load balancer
 
-Flyway owns the schema and Hibernate is set to `ddl-auto: validate`, so the
-entity and the migrations can't drift apart silently.
+`edge-lb` is plain Java with **no dependencies at all** — `HttpServer` to listen,
+`HttpClient` to forward, one virtual thread per request. A proxy is almost pure I/O waiting,
+which is precisely the workload virtual threads exist for; it means the forwarding code is
+ordinary blocking code rather than callbacks.
 
-| Migration | Contents |
-|-----------|----------|
-| `V1__init.sql` | `link` — code, target type/URL, timestamps, optional expiry |
-| `V2__link_code_seq.sql` | the sequence short codes are drawn from |
-| `V3__link_stats.sql` | `link_stats` — the flushed click totals |
+It health-checks `/actuator/health/readiness` every 5 s, and a failed forward marks that
+backend unhealthy immediately and retries another. Two non-obvious requirements:
+`followRedirects(NEVER)`, because this app's whole purpose is returning `302`s and a client
+that chased them would hand the caller someone else's page; and filtering hop-by-hop headers,
+some of which `HttpClient` refuses to let you set at all.
 
-`link.target_type` is already `'URL' | 'MEDIA'` and a `media_asset_id` column is
-reserved, for the upload pipeline below.
+### The async pipeline
+
+An upload streams to object storage, writes a `PENDING` row, and returns `202` in about
+50 ms. The job is published to RabbitMQ **after the transaction commits**. Postgres and
+RabbitMQ share no transaction, so this is a choice between failure modes: publishing inside
+the transaction risks the message being delivered and then the transaction rolling back,
+handing a worker an asset id that does not exist. Publishing after commit leaves only a lost
+message, which strands the asset visibly `PENDING` and is safe to re-drive.
+
+The worker is idempotent because **at-least-once delivery means duplicates are normal
+operation, not a bug**: already `READY` means ack and skip. Permanent failures (an undecodable
+file) throw `AmqpRejectAndDontRequeueException` and skip the retries entirely; transient ones
+get backed-off retries and then the dead-letter queue, where a listener records `FAILED`.
+Without `default-requeue-rejected: false` an exhausted message is requeued forever and one
+poison file wedges the queue for everything behind it.
+
+The two services share a **JSON contract, not a Java class**. The producer stamps a
+`__TypeId__` header naming a class the worker does not have; the worker sets
+`TypePrecedence.INFERRED` so its own listener signature wins.
+
+---
+
+## Design decisions & tradeoffs
+
+Where I measured something, the number is here. Two of these went against my first instinct.
+
+**Least-connections is worse than round-robin here — so it is off.** I implemented both. On
+this workload every backend ties at zero in-flight and `min()` deterministically returns the
+first, so least-connections degenerates to "always pick the first":
+
+| strategy | 30 sequential requests | 30 concurrent |
+|---|---|---|
+| round-robin | 10 / 10 / 10 | ~even |
+| least-connections | **30 / 0 / 0** | 8 / 7 / 15 |
+
+Both stay behind a config switch. Least-connections earns its keep when request *durations*
+vary, which this workload does not have.
+
+**Health checks alone do not give you failover.** The obvious design — only route to backends
+the health checker says are up — leaves a window equal to the check interval. Killing one of
+three instances produced **20 failures out of 60**, because all 60 requests completed inside
+one 5-second interval. Marking a backend unhealthy on the *first* failed forward and retrying
+another took the same test to **90/90**. The periodic checker's real job is putting it back.
+
+**The rate limit is genuinely global.** Twelve creates round-robined across three instances:
+the token count fell 9, 8, 7 … 0 and the last two got `429`, against a single Redis key. An
+in-memory bucket would have allowed all twelve, and the effective limit would have been 30.
+
+**Scheduled work needs leader election.** `@Scheduled` fires on every instance, so three
+copies raced to drain the same counters. A `SET key NX EX` lock makes exactly one win per
+cycle. Over two cycles two *different* instances won, and the click total was exactly right —
+no double counting, nothing lost.
+
+**Identity generation: both strategies, opposite reasons.** `link` uses `SEQUENCE` because the
+short code is derived from the id and must be in the same `INSERT`. `media_asset` uses
+`IDENTITY` because its id is only needed *after* the insert, to point the link at it and to
+put in the queue message.
+
+**Multi-stage Docker build.** The final image is ~600 MB (a JRE plus the jar) instead of
+~1.2 GB, and contains no compiler, no Maven, no source, and none of the 250 MB dependency
+cache.
+
+### Known limitations
+
+- **Object storage is SeaweedFS, not MinIO.** MinIO's community images are no longer publicly
+  pullable and LocalStack's current image requires a licence. The application code is
+  unchanged either way — AWS SDK v2 against a custom endpoint.
+- **Uploads are disk-buffered, not streamed end to end.** Spring writes the multipart to a
+  temp file before the handler runs, so the file stays off the heap but is not a true stream.
+- **The dead-letter listener records `FAILED` but nothing re-drives it.** A failed asset needs
+  manual intervention.
+- **Codes are enumerable** (see above).
+- **No auth.** Anyone who can reach the API can create links and upload files.
 
 ---
 
@@ -126,34 +229,48 @@ reserved, for the upload pipeline below.
 
 ```
 quicklink/
-├── docker-compose.yml        Postgres 16 + Redis 7 for local dev
-├── pom.xml                   parent POM (Java 21, Boot 4.1.0)
-└── app-service/
-    └── src/main/java/com/quicklink/app/
-        ├── link/             entity, repositories, service, controller, Base62,
-        │                     click counters + the scheduled flusher
-        └── ratelimit/        Bucket4j filter and its Redis wiring
+├── docker-compose.yml       all infrastructure + 3 app + 3 worker + the LB
+├── pom.xml                  parent POM (Java 21, Boot 4.1.0)
+│
+├── app-service/             REST API, stateless, scaled ×3
+│   └── src/main/
+│       ├── java/com/quicklink/app/
+│       │   ├── link/        shortener, Base62, cache, click counters, flusher
+│       │   ├── media/       upload, S3 client, presigning, status
+│       │   └── ratelimit/   Bucket4j filter and its Redis wiring
+│       └── resources/
+│           ├── db/migration/   Flyway V1–V4
+│           └── static/         the live architecture visualisation
+│
+├── worker/                  RabbitMQ consumer, image compression, scaled ×3
+│                            JdbcTemplate rather than JPA — a few narrow UPDATEs
+│
+└── edge-lb/                 L7 load balancer, plain Java, zero dependencies
 ```
 
 ## Tests
 
 ```bash
-./mvnw test
+./mvnw test        # 63 tests; needs Docker, no hand-started dependencies
 ```
 
-Unit tests cover Base62 and the service and flusher logic; the integration tests
-spin up real Postgres and Redis with **Testcontainers**, so they need Docker but
-no hand-started dependencies.
+Pure logic (Base62, backend selection, image compression) runs as plain JUnit with no Spring
+context. Everything else uses Testcontainers.
+
+Two things the integration tests do deliberately:
+
+**The worker test publishes through the broker**, in the producer's exact wire format
+including the foreign `__TypeId__` header. A direct call to the listener would not notice if
+the cross-module type configuration were removed.
+
+**It applies app-service's real migration files** rather than a copied schema, so a worker
+test cannot pass against a table shape that production does not have.
+
+Earned the hard way: a test that containerises Postgres but still uses the developer's Redis
+is worse than no isolation. It writes state other tests read, and the failures look random
+and depend on ordering.
 
 ---
 
-## Status
-
-Built so far: the shortener core, caching, click analytics, and distributed rate
-limiting — single service instance.
-
-Planned, and why the POM is already multi-module: a **custom load balancer** in
-front of several stateless app instances, an **async media upload and
-compression pipeline** (a `worker` module, which is what `TargetType.MEDIA` is
-for), and an observability/docs pass. The full reasoning lives in
+Full build log, including the things that went wrong and why, is in
 [`springboot-quicklink-development-plan.md`](springboot-quicklink-development-plan.md).

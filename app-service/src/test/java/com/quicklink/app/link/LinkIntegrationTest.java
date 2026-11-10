@@ -11,6 +11,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.jayway.jsonpath.JsonPath;
+import com.quicklink.app.IntegrationTest;
 import com.quicklink.app.media.MediaAsset;
 import com.quicklink.app.media.MediaAssetRepository;
 import com.quicklink.app.media.MediaStatus;
@@ -25,62 +26,19 @@ import javax.imageio.ImageIO;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.mock.web.MockMultipartFile;
-import org.springframework.test.context.DynamicPropertyRegistry;
-import org.springframework.test.context.DynamicPropertySource;
-import org.testcontainers.containers.GenericContainer;
 import software.amazon.awssdk.core.sync.RequestBody;
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.model.BucketAlreadyExistsException;
 import software.amazon.awssdk.services.s3.model.BucketAlreadyOwnedByYouException;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
-import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.ResultActions;
 import org.springframework.test.web.servlet.request.RequestPostProcessor;
-import org.testcontainers.junit.jupiter.Container;
-import org.testcontainers.junit.jupiter.Testcontainers;
-import com.redis.testcontainers.RedisContainer;
-import org.testcontainers.postgresql.PostgreSQLContainer;
 
-@SpringBootTest
 @AutoConfigureMockMvc
-@Testcontainers
-class LinkIntegrationTest {
-
-    @Container
-    @ServiceConnection
-    static PostgreSQLContainer postgres = new PostgreSQLContainer("postgres:16");
-
-    /**
-     * Redis must be isolated too. Without this the test wrote click counters into the
-     * shared dev Redis for links that only ever existed in the throwaway Postgres above,
-     * orphaning counters whose foreign key could never be satisfied.
-     */
-    @Container
-    @ServiceConnection
-    static RedisContainer redis = new RedisContainer("redis:7");
-
-    /**
-     * Media uploads need object storage. No Testcontainers module exists for SeaweedFS,
-     * so a GenericContainer does the job. Both the internal endpoint and the presigning
-     * endpoint point here, so a presigned URL is reachable from this JVM.
-     */
-    @Container
-    static GenericContainer seaweedfs = new GenericContainer("chrislusf/seaweedfs:4.53")
-            .withCommand("server", "-s3", "-dir=/data")
-            .withExposedPorts(8333)
-            .waitingFor(org.testcontainers.containers.wait.strategy.Wait
-                    .forHttp("/").forPort(8333).forStatusCode(200));
-
-    @DynamicPropertySource
-    static void s3Properties(DynamicPropertyRegistry registry) {
-        String base = "http://" + seaweedfs.getHost() + ":" + seaweedfs.getMappedPort(8333);
-        registry.add("app.s3.endpoint", () -> base);
-        registry.add("app.s3.public-endpoint", () -> base);
-    }
+class LinkIntegrationTest extends IntegrationTest {
 
     @Autowired
     MockMvc mockMvc;
@@ -291,20 +249,4 @@ class LinkIntegrationTest {
                .andExpect(status().isNotFound());
     }
 
-    /**
-     * In compose the s3-init container creates these; nothing does so here. A missing
-     * bucket surfaces as 403 Access Denied from SeaweedFS, not 404, which is a
-     * misleading error to debug. Idempotent because the container is shared by every
-     * test in this class.
-     */
-    @BeforeEach
-    void createBuckets() {
-        for (String bucket : new String[] {"originals", "processed"}) {
-            try {
-                s3.createBucket(b -> b.bucket(bucket));
-            } catch (BucketAlreadyOwnedByYouException | BucketAlreadyExistsException alreadyThere) {
-                // a previous test in this class created it
-            }
-        }
-    }
 }
