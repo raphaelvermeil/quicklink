@@ -19,6 +19,14 @@ services:
       POSTGRES_USER: quicklink
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
     volumes: [pgdata:/var/lib/postgresql/data]
+    # Every service here carries a restart policy, so a VM reboot or an Azure
+    # stop/start brings the whole stack back with no one logged in. Note what makes
+    # that work: Docker does not honour depends_on when it restarts containers itself,
+    # so app and worker will come up before Postgres is accepting connections, die, and
+    # be restarted until it is. The convergence is the point — but it does mean the
+    # policy has to be on everything, or the dependency that never restarts strands the
+    # ones that do.
+    restart: unless-stopped
     # No published port. On a public VM, publishing 5434 would put Postgres on the
     # internet; this reaches it over the compose network instead.
     healthcheck:
@@ -30,6 +38,7 @@ services:
   redis:
     image: redis:7
     volumes: [redisdata:/data]
+    restart: unless-stopped
 
   app:
     build:
@@ -66,6 +75,10 @@ services:
     depends_on:
       postgres: { condition: service_healthy }
       redis: { condition: service_started }
+    # An instance that dies should come back rather than quietly leaving the balancer
+    # with fewer backends than the diagram claims. unless-stopped, not always, so
+    # `docker stop quicklink-app-2` to demo failover stays stopped.
+    restart: unless-stopped
     deploy:
       replicas: 3
 
@@ -91,6 +104,10 @@ services:
       APP_S3_BUCKETS_PROCESSED: ${APP_S3_BUCKETS_PROCESSED:?}
     depends_on:
       postgres: { condition: service_healthy }
+    # This is the one that bit: the worker exited 0 on startup and nothing noticed,
+    # because an exited container looks much like a quiet one in `docker compose ps`.
+    # A restarting container is visible in the status column and in `docker events`.
+    restart: unless-stopped
     # Two, not three: a 2 vCPU VM has little to spare, and queue depth is the thing to
     # scale on anyway.
     deploy:
@@ -105,6 +122,10 @@ services:
       EDGE_STRATEGY: ROUND_ROBIN
     depends_on:
       app: { condition: service_started }
+    # The one the outside world reaches, so it is the one whose absence looks like the
+    # whole deployment being down. It health-checks its backends, so starting before
+    # the app instances costs a few seconds of marking them down, not a bad state.
+    restart: unless-stopped
     # Port 80, so the deployment needs no port number in its URL. The only published
     # port in the stack.
     ports: ["80:8080"]

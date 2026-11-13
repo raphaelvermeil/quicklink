@@ -246,6 +246,29 @@ class SqsWorkerPipelineTest {
                         + "worker holds no AMQP connection factory it could never use");
     }
 
+    /**
+     * A guard for a failure this JVM cannot reproduce.
+     *
+     * Deployed in SQS mode the worker started, logged "Started WorkerApplication" and
+     * exited 0 a quarter of a second later, leaving jobs in the queue with nobody
+     * receiving them. Its only threads were SqsQueuePoller's virtual ones, and virtual
+     * threads are always daemon threads, so nothing held the JVM open once main
+     * returned. Rabbit mode had hidden this: the listener container uses non-daemon
+     * threads.
+     *
+     * No test running under JUnit can observe that — the harness keeps this JVM alive
+     * and the test context open — so what is pinned here is the configuration that
+     * prevents it, which at least fails loudly if someone removes the property. The
+     * behavioural net is `restart: unless-stopped` in docker-compose.cloud.yml.
+     */
+    @Test
+    void theJvmIsHeldOpenDeliberatelyRatherThanByAccident() {
+        assertTrue(context.getEnvironment()
+                        .getProperty("spring.main.keep-alive", Boolean.class, false),
+                "spring.main.keep-alive must stay on: the poller's virtual threads are "
+                        + "daemon threads by definition and cannot hold the JVM open");
+    }
+
     @Test
     void takesAJobOverSqsAndMarksItReady() throws Exception {
         long assetId = stageAsset(png(600), "image/png");

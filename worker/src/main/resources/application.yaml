@@ -1,6 +1,20 @@
 spring:
   application:
     name: worker
+  main:
+    # The worker is a daemon process with no web server, so nothing keeps the JVM alive
+    # on its own account. In rabbit mode it survived only by accident: the listener
+    # container happens to use non-daemon threads. In sqs mode SqsQueuePoller runs on
+    # virtual threads, and those are ALWAYS daemon threads — Thread.ofVirtual() cannot
+    # make a non-daemon one — so main returned, the JVM exited 0 a quarter-second after
+    # "Started WorkerApplication", and jobs sat in the queue with nobody receiving them.
+    #
+    # Set unconditionally rather than only for sqs: "this process runs until something
+    # stops it" is true in both modes, and saying it here beats depending on which
+    # threads some library happened to create. Boot starts one non-daemon thread on
+    # context refresh and interrupts it on context close, so SIGTERM still shuts down
+    # cleanly.
+    keep-alive: true
   # No JPA here: the worker uses JdbcTemplate for a few narrow UPDATEs.
   datasource:
     url: jdbc:postgresql://localhost:5434/quicklink
