@@ -28,7 +28,10 @@ Step 1 sets up a budget alarm before anything else exists.
   Homebrew core no longer carries a current Terraform, since it stopped being open source.
 - An **SSH key pair** (`ssh-keygen -t ed25519` if you don't have one).
 
-Nothing here needs a domain name. Step 4 is where you'd add one.
+You also need a **DNS name pointing at the VM**. HTTPS is not optional in this stack — it
+will not start without `DOMAIN`, and it cannot be reached by bare IP. If you don't own a
+domain, Azure gives every public IP a free `<label>.<region>.cloudapp.azure.com` name that
+Let's Encrypt is happy to certify. Step 4 covers it.
 
 ---
 
@@ -138,7 +141,8 @@ from step 1.4. It is gitignored; it must never be committed.
 ```bash
 cat > .env <<'EOF'
 POSTGRES_PASSWORD=<a long random string>
-APP_BASE_URL=http://<the VM's public IP>
+DOMAIN=<your.domain>
+APP_BASE_URL=https://<your.domain>
 AWS_REGION=us-east-2
 AWS_ACCESS_KEY_ID=<app_access_key_id>
 AWS_SECRET_ACCESS_KEY=<app_secret_access_key>
@@ -163,51 +167,109 @@ docker compose -f docker-compose.cloud.yml up -d --build
 The first build compiles all three modules and takes several minutes. Compose refuses to
 start if any variable above is missing, naming the one it wants.
 
-**3.4 — Verify, in order.** Each step exercises one more layer.
+Nothing answers over HTTPS yet, and that is expected: Caddy needs the DNS record from step
+4.1 before Let's Encrypt will issue a certificate. It keeps retrying on its own, so starting
+now and pointing DNS afterwards is fine — the certificate appears once the name resolves.
+**Step 5 is where you check that any of this works**, because every URL worth testing is an
+`https://` one.
+
+---
+
+## 4. The domain and HTTPS
+
+**This is not an optional step any more.** `caddy` publishes 80 and 443, `edge-lb` publishes
+nothing, and `DOMAIN` has no default — the stack refuses to start without it, and there is no
+way to reach it by bare IP. Presigned S3 URLs were always HTTPS; this is what covers the
+app's own traffic, including the short links themselves.
+
+**4.1 — Point DNS at the VM.** An A record for your hostname at the VM's public IPv4.
+Let's Encrypt validates over HTTP against that name, so the record has to resolve *before*
+the stack starts. Confirm the VM's public IP is **Static** first (step 6) or the record goes
+stale the first time you deallocate.
+
+**4.2 — Open 443.** An inbound rule for TCP 443 in the VM's network security group, next to
+the 22 and 80 from step 2.1. Port 80 has to stay open: Caddy answers the ACME HTTP challenge
+on it and redirects `http://` to `https://`.
+
+**4.3 — Set both variables** in `.env`:
 
 ```bash
-# the load balancer is reaching an app instance
-curl -i http://<ip>/actuator/health          # 200, and an X-Instance-Id header
+DOMAIN=quicklink.example.com
+APP_BASE_URL=https://quicklink.example.com
+```
+
+Two variables rather than one, and they have to agree. `DOMAIN` is the certificate and the
+only hostname Caddy will answer to; `APP_BASE_URL` is baked into every short link the API
+hands out, so getting it wrong produces links that resolve but point elsewhere.
+
+**4.4 — Watch the certificate arrive.** The stack is already running from step 3.3; if you
+changed `.env` to add `DOMAIN`, re-run that command first so Caddy picks it up.
+
+```bash
+docker compose -f docker-compose.cloud.yml logs -f caddy
+
+curl -I https://<your.domain>/actuator/health     # 200
+curl -I http://<your.domain>/                     # 308 to https://
+```
+
+If the certificate never appears, it is almost always DNS not yet pointing at the VM, or 80
+closed in the NSG; Caddy's log names which. Certificates live in the `caddy_data` volume, so
+restarts reuse them — Let's Encrypt permits 5 duplicate certificates per week, which is
+easy to burn through while debugging something unrelated.
+
+**The rate limiter survives the extra hop.** Every request now reaches `edge-lb` from Caddy's
+container address, so a limiter keying on the socket would put all callers in one bucket.
+[`Caddyfile`](Caddyfile) documents why it doesn't: Caddy declares no `trusted_proxies`, so it
+discards any `X-Forwarded-For` the caller sent and writes the real peer; `edge-lb` appends to
+that; the app's `ForwardedHeaderFilter` reads the first entry. Verified by creating a link
+through Caddy and reading the bucket back — the key was the caller's own address, and a
+request carrying `X-Forwarded-For: 9.9.9.9` produced no bucket of its own.
+
+---
+
+## 5. Verify, in order
+
+Each step exercises one more layer. Everything is `https://` now, so these only pass once
+step 4 has finished and Caddy holds a certificate.
+
+```bash
+# TLS, Caddy, the load balancer, and an app instance behind it
+curl -i https://<your.domain>/actuator/health      # 200, and an X-Instance-Id header
 
 # Postgres, Redis and the rate limiter
-curl -i -X POST http://<ip>/api/links \
+curl -i -X POST https://<your.domain>/api/links \
   -H 'Content-Type: application/json' \
-  -d '{"longUrl":"https://example.com"}'     # 201, X-Rate-Limit-Remaining: 9
+  -d '{"longUrl":"https://example.com"}'           # 201, X-Rate-Limit-Remaining: 9
 
-curl -i http://<ip>/<shortCode>              # 302 to example.com
+curl -i https://<your.domain>/<shortCode>          # 302 to example.com
 
 # S3 and SQS end to end: upload, then watch the status flip
-curl -i -F file=@some-photo.jpg http://<ip>/api/media        # 202, status PENDING
-curl    http://<ip>/api/media/<shortCode>/status             # READY, with byte counts
+curl -i -F file=@some-photo.jpg https://<your.domain>/api/media    # 202, status PENDING
+curl    https://<your.domain>/api/media/<shortCode>/status         # READY, with byte counts
 ```
+
+The `shortUrl` in that 201 should start with `https://<your.domain>`. If it says something
+else, `APP_BASE_URL` disagrees with `DOMAIN` — see step 4.3, and note that links already
+created keep the old address.
 
 If the upload sticks at `PENDING`, the worker is the place to look:
 
 ```bash
 docker compose -f docker-compose.cloud.yml logs -f worker
-curl http://<ip>/api/inspect/queues          # depth, or an error if the queue is unreachable
+curl https://<your.domain>/api/inspect/queues      # depth, or an error if the queue is unreachable
 ```
 
-The visualiser is at `http://<ip>/`.
+A worker that exited instead of staying up would show as `Restarting` here:
+
+```bash
+docker compose -f docker-compose.cloud.yml ps
+```
+
+The visualiser is at `https://<your.domain>/`.
 
 ---
 
-## 4. Optional: a domain and HTTPS
-
-Presigned S3 URLs are already HTTPS; it is the app's own traffic that is plain HTTP, which
-means a short link is visible to anyone on the path. With a domain pointed at the VM, Caddy
-gets a certificate on its own:
-
-1. Point an A record at the VM's IP.
-2. Add an inbound rule for TCP 443 to the VM's network security group.
-3. Add a `caddy` service in front of `edge-lb`, with a two-line Caddyfile
-   (`your.domain { reverse_proxy edge-lb:8080 }`), and take the published port off
-   `edge-lb` so Caddy is the only thing listening.
-4. Set `APP_BASE_URL=https://your.domain` and recreate the app instances.
-
----
-
-## 5. Operating it
+## 6. Operating it
 
 ```bash
 # logs

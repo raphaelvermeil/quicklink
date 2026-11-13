@@ -1,0 +1,29 @@
+# HTTPS for the deployed stack (docker-compose.cloud.yml).
+#
+# Caddy is the only thing listening on the VM. It terminates TLS, obtains and renews the
+# certificate from Let's Encrypt on its own, redirects http:// to https://, and proxies
+# everything through to the hand-written load balancer.
+#
+# The hostname comes from $DOMAIN in .env, so this file is not tied to one domain.
+{$DOMAIN} {
+	# Why putting a proxy here does not break the rate limiter.
+	#
+	# The chain is browser -> caddy -> edge-lb -> app. edge-lb appends its peer to
+	# X-Forwarded-For, and in the app Spring's ForwardedHeaderFilter
+	# (server.forward-headers-strategy=framework) reads the FIRST entry of that header
+	# to answer getRemoteAddr() — which is exactly what RateLimitFilter keys its Redis
+	# bucket on. Every request now arrives at edge-lb from Caddy's container address, so
+	# without that header all callers would share a single bucket.
+	#
+	# The header also has to be untrustworthy from outside, or a caller could put an
+	# address of its own first, pick its own bucket, and mint a fresh allowance per
+	# request. It cannot: Caddy declares no trusted_proxies, and with none declared it
+	# discards any X-Forwarded-For the client sent and writes the real peer instead.
+	# MEASURED, not assumed — a request carrying "X-Forwarded-For: 9.9.9.9" reached the
+	# upstream carrying the caller's real address and nothing else.
+	#
+	# So do not add trusted_proxies here. That is the setting that makes Caddy start
+	# appending to the client's value, and it would hand every caller the ability to
+	# choose its own rate-limit bucket.
+	reverse_proxy edge-lb:8080
+}

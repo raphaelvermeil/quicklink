@@ -1,7 +1,7 @@
 # Quicklink
 
-**Live at <http://130.131.20.236/>** — the architecture visualiser below, running on the
-deployed stack: real S3, real SQS, no canned data.
+**Live at <https://quicklink-rv.northcentralus.cloudapp.azure.com>** — the architecture
+visualiser below, running on the deployed stack: real S3, real SQS, no canned data.
 
 A URL shortener and async media pipeline on **Spring Boot 4 / Java 21**, running as
 three stateless app instances behind a **load balancer I wrote from scratch**, with a
@@ -25,9 +25,9 @@ two pure commodities are not. [Service-by-service breakdown below](#deploying).
 
 ## See it working
 
-It is deployed at **<http://130.131.20.236/>**, so you can press the buttons without
-cloning anything. The deployed copy talks to S3 and SQS; the local one below is the same
-code against SeaweedFS and RabbitMQ.
+It is deployed at **<https://quicklink-rv.northcentralus.cloudapp.azure.com>**, so you can
+press the buttons without cloning anything. The deployed copy talks to S3 and SQS behind
+Caddy-terminated TLS; the local one below is the same code against SeaweedFS and RabbitMQ.
 
 ```bash
 docker compose up -d --build        # Postgres, Redis, RabbitMQ, SeaweedFS,

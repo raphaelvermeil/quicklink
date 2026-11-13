@@ -122,14 +122,35 @@ services:
       EDGE_STRATEGY: ROUND_ROBIN
     depends_on:
       app: { condition: service_started }
-    # The one the outside world reaches, so it is the one whose absence looks like the
-    # whole deployment being down. It health-checks its backends, so starting before
-    # the app instances costs a few seconds of marking them down, not a bad state.
+    # It health-checks its backends, so starting before the app instances costs a few
+    # seconds of marking them down, not a bad state.
     restart: unless-stopped
-    # Port 80, so the deployment needs no port number in its URL. The only published
-    # port in the stack.
-    ports: ["80:8080"]
+    # No published port. Caddy terminates TLS and is the only thing listening on the
+    # host, so the load balancer is reachable on the compose network only.
+
+  caddy:
+    image: caddy:2
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # Certificates and ACME account keys live in /data. This volume is the reason
+      # restarting the stack does not request a new certificate every time — Let's
+      # Encrypt rate-limits duplicate certificates to 5 per week, which is easy to
+      # burn through while getting a deployment working.
+      - caddy_data:/data
+      - caddy_config:/config
+    environment:
+      # Fail fast like every other value here: an empty hostname would make Caddy
+      # serve nothing and the failure would show up as a TLS error, not a config one.
+      DOMAIN: ${DOMAIN:?set DOMAIN in .env, e.g. quicklink.example.com}
+    depends_on:
+      edge-lb: { condition: service_started }
+    # 80 as well as 443: Caddy needs it for the ACME HTTP challenge and to redirect
+    # http:// to https://. Both must be open in the VM's network security group.
+    ports: ["80:80", "443:443"]
+    restart: unless-stopped
 
 volumes:
   pgdata: {}
   redisdata: {}
+  caddy_data: {}
+  caddy_config: {}
