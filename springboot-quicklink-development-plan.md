@@ -540,7 +540,7 @@ Each stage produces something you can run and demo. Build the vertical slice fir
 
 4. **Deploy.** A separate `docker-compose.cloud.yml` rather than an override, because three services *disappear* (RabbitMQ, SeaweedFS, the bucket bootstrap) and compose overrides can add services but not remove them. Every value comes from `.env` with `${VAR:?}`, so compose refuses to start with a missing queue URL instead of failing later for an unreadable reason. Blank `APP_S3_ENDPOINT` is what selects real AWS.
 
-   Two environment traps on Oracle Cloud's free tier: traffic is filtered **twice** (the VCN security list *and* iptables rules baked into their Ubuntu image, which need `netfilter-persistent save` to survive a reboot), and the always-free ARM shape is routinely out of capacity. The ARM part costs nothing in code — images are built on the VM and `eclipse-temurin:21` is multi-arch.
+   The VM was meant to be Oracle Cloud's Always Free ARM shape, and that plan died on capacity: over 1,300 automated create attempts across three shape sizes returned `Out of host capacity`, and Oracle halved the Always Free A1 allowance in June 2026. It runs on Azure for Students instead — 2 vCPU / 4 GB ARM, paid from the $100 credit — where the only firewall is the NSG, and the lesson is that an always-free tier is a queue, not an allocation. The ARM part costs nothing in code: images are built on the VM and `eclipse-temurin:21` is multi-arch.
 
 **Deliverable:** one codebase, two deployments. `./mvnw test` proves both transports, and `DEPLOY.md` + `infra/` are enough for someone else to stand it up.
 

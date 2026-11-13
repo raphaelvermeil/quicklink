@@ -4,5 +4,5 @@
 budget_notification_email = "you@example.com"
 
 # Optional overrides.
-# aws_region         = "eu-west-3"
+# aws_region         = "us-east-2"
 # monthly_budget_usd = 1

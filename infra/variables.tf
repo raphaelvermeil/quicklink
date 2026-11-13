@@ -1,7 +1,14 @@
 variable "aws_region" {
-  description = "Region for every resource here. Pick the one nearest the VM running the app: each upload crosses this link twice."
+  description = <<-EOT
+    Region for every resource here. Pick the one nearest the VM running the app: each
+    upload crosses this link twice.
+
+    Defaults to us-east-2 because the account this was deployed from sits under an
+    organization SCP that permits only that region — anything else fails with "explicit
+    deny in a service control policy", which reads like a credentials problem and is not.
+  EOT
   type        = string
-  default     = "eu-west-3"
+  default     = "us-east-2"
 }
 
 variable "project" {

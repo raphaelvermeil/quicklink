@@ -91,8 +91,8 @@ services:
       APP_S3_BUCKETS_PROCESSED: ${APP_S3_BUCKETS_PROCESSED:?}
     depends_on:
       postgres: { condition: service_healthy }
-    # Two, not three: a 1 OCPU free VM has little to spare, and queue depth is the
-    # thing to scale on anyway.
+    # Two, not three: a 2 vCPU VM has little to spare, and queue depth is the thing to
+    # scale on anyway.
     deploy:
       replicas: 2
 

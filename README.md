@@ -249,7 +249,7 @@ The deployed topology is **one small VM running Docker Compose, with object stor
 queue rented from AWS**:
 
 ```
-  browser ──► VM (Oracle Cloud always-free, 4 OCPU / 24 GB ARM)
+  browser ──► VM (Azure for Students, 2 vCPU / 4 GB ARM)
               └─ compose: edge-lb, 3 app, 3 worker, Postgres, Redis
                                 │
                                 ▼
