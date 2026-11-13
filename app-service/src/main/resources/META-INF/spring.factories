@@ -1,0 +1,5 @@
+# Boot 4 moved this interface from org.springframework.boot.env to org.springframework.boot.
+# EnvironmentPostProcessors are still discovered through spring.factories, not through the
+# META-INF/spring/*.imports files that replaced it for auto-configuration.
+org.springframework.boot.EnvironmentPostProcessor=\
+com.quicklink.app.media.QueueModeEnvironmentPostProcessor

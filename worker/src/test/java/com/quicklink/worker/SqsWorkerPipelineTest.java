@@ -17,6 +17,7 @@ import javax.imageio.ImageIO;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.springframework.amqp.rabbit.connection.ConnectionFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
@@ -240,6 +241,9 @@ class SqsWorkerPipelineTest {
                         + "would try to consume from a broker that is not deployed");
         assertTrue(context.getBeanNamesForType(SqsQueuePoller.class).length >= 2,
                 "both the job poller and the DLQ poller should be running");
+        assertEquals(0, context.getBeanNamesForType(ConnectionFactory.class).length,
+                "Boot's own RabbitAutoConfiguration must be excluded as well, so the "
+                        + "worker holds no AMQP connection factory it could never use");
     }
 
     @Test
