@@ -1,5 +1,8 @@
 # Quicklink
 
+**Live at <http://130.131.20.236/>** — the architecture visualiser below, running on the
+deployed stack: real S3, real SQS, no canned data.
+
 A URL shortener and async media pipeline on **Spring Boot 4 / Java 21**, running as
 three stateless app instances behind a **load balancer I wrote from scratch**, with a
 pool of three workers compressing uploads off the request thread.
@@ -12,9 +15,19 @@ producer/consumer pipeline with idempotency and a dead-letter queue.
 I built the load balancer by hand to understand what nginx and HAProxy do for me.
 Measuring it changed two of my design decisions — both are written up below.
 
+**Where it runs.** One **Azure** VM carries the whole stack under Docker Compose — the load
+balancer, three app instances, two workers (three locally), Postgres and Redis. Two things are rented from
+**AWS**: **S3** holds the image buckets and **SQS** carries the compression jobs. The rule
+was simple — anything whose mechanism is the point of the project is self-hosted, and the
+two pure commodities are not. [Service-by-service breakdown below](#deploying).
+
 ---
 
 ## See it working
+
+It is deployed at **<http://130.131.20.236/>**, so you can press the buttons without
+cloning anything. The deployed copy talks to S3 and SQS; the local one below is the same
+code against SeaweedFS and RabbitMQ.
 
 ```bash
 docker compose up -d --build        # Postgres, Redis, RabbitMQ, SeaweedFS,
@@ -250,11 +263,35 @@ queue rented from AWS**:
 
 ```
   browser ──► VM (Azure for Students, 2 vCPU / 4 GB ARM)
-              └─ compose: edge-lb, 3 app, 3 worker, Postgres, Redis
+              └─ compose: edge-lb, 3 app, 2 worker, Postgres, Redis
                                 │
                                 ▼
                  AWS: S3 (originals + processed) · SQS (+ DLQ)
 ```
+
+### What each provider actually does
+
+| Where | Service | Its job here |
+|---|---|---|
+| **Azure** | Virtual Machine — `Standard_B2pls_v2`, 2 vCPU / 4 GB, ARM64, Ubuntu 24.04 | runs every container: edge-lb on `:80`, 3 app instances, 2 workers, Postgres, Redis |
+| **Azure** | Network Security Group | the only firewall in front of the box; inbound 22 and 80 |
+| **AWS** | S3 — `quicklink-originals-<account>` | the upload exactly as it arrived; a lifecycle rule expires objects after 30 days, since they are only needed until the worker has read them |
+| **AWS** | S3 — `quicklink-processed-<account>` | the compressed result, handed to browsers as presigned GETs so image bytes never pass back through the app |
+| **AWS** | SQS — `quicklink-media-compress` | carries compress jobs from app to worker: 20s long polling, 120s visibility timeout as the handler's deadline |
+| **AWS** | SQS — `quicklink-media-compress-dlq` | redrive target after 3 failed receives, 14-day retention — the SQS equivalent of RabbitMQ's dead-letter exchange |
+| **AWS** | IAM — one user, one access key | scoped to exactly those two buckets and two queues and nothing else; no `ListBucket` |
+| **AWS** | Budgets | emails at forecast >80% and actual >100% of a $1/month budget |
+
+**Azure is only renting a Linux box.** No Azure API, SDK or managed service appears anywhere
+in the project — the VM could be Hetzner, EC2, or the Oracle machine this was originally
+written for, and nothing but an IP address would change. It is Azure because Azure for
+Students supplies the credit. (Oracle's Always Free ARM shape was the original plan and never
+had capacity: ~1,300 create attempts, all `Out of host capacity`.)
+
+**AWS is used as services, not as a host.** S3 and SQS are reached through the SDK, and
+[`infra/`](infra/) manages them in Terraform so the whole AWS side can be destroyed and
+recreated from one command. The VM is not in Terraform — it was made in the portal, and one
+machine holding no state worth reproducing is not worth the module.
 
 The split is on purpose, and it is the same judgement in both directions.
 
